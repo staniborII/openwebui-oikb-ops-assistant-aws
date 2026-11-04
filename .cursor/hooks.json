@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "python .cursor/hooks/guard.py before",
+        "failClosed": true
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "python .cursor/hooks/guard.py after"
+      }
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "sync-metrics",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.700.0"
+  }
+}

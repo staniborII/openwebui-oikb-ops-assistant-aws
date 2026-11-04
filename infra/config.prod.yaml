@@ -1,0 +1,19 @@
+# Settings that are safe to commit. Secrets stay in .env.
+# Replace CERTIFICATE_ARN with a us-east-1 certificate that covers WEB_DOMAIN_NAME.
+# Replace SNS_EMAIL with the inbox that should confirm the subscription.
+SERVICE: org
+NAME: chapters
+OWNER: chaptersag
+BUCKET_NAME: chapters-openwebui-prod
+WEB_DOMAIN_NAME: prod-client-openwebui.flexxytech.com
+ALLOWED_IPS:
+  - 0.0.0.0/0
+DOMAIN_HOSTED_ZONE_ID: Z05020441DNM63CBYX7ND
+DOMAIN_HOSTED_ZONE_NAME: flexxytech.com
+CERTIFICATE_ARN: arn:aws:acm:us-east-1:863518416406:certificate/665861ca-984e-436a-8c3d-63efe121312e
+SNS_EMAIL: stan.ibor@yahoo.com
+RAG_EMBEDDING_MODEL: text-embedding-3-small
+OPEN_WEBUI_IMAGE: ghcr.io/open-webui/open-webui:v0.13.0
+OIKB_IMAGE: ghcr.io/open-webui/oikb:0.6.0
+MCP_IMAGE: ghcr.io/github/github-mcp-server:v2.0.3
+MONTHLY_BUDGET_USD: 200

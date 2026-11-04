@@ -1,0 +1,14 @@
+---
+description: Case-study architecture the agent must follow
+alwaysApply: true
+---
+
+# Architecture
+
+`docs/private/plan.md` is the contract. Read it before changing infrastructure or bootstrap code.
+
+- Region is `us-east-1`.
+- Stacks depend in one direction only: Network, Data, App, Orchestration, Monitoring. Data does not import App. Monitoring only reads earlier stacks.
+- Stage comes from `infra/config.dev.yaml` or `infra/config.prod.yaml`. Resource ids and names go through `stagified` in `infra/utils/index.ts`.
+- Open WebUI stays the official image. Do not set Redis or Tika variables.
+- Plain settings are environment variables. Credentials are Secrets Manager injections in `us-east-1`.

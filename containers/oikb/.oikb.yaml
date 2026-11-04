@@ -1,0 +1,13 @@
+# Syncs the public oikb repository into the knowledge base every 15 minutes. Posts to the local signer on error.
+defaults:
+  interval: 15m
+  url: ${OPEN_WEBUI_URL}
+  token: ${OPEN_WEBUI_API_KEY}
+  notify:
+    url: ${NOTIFY_URL}
+    on: error
+
+sources:
+  - name: oikb
+    source: github:open-webui/oikb
+    kb-id: ${KB_ID}

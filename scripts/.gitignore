@@ -1,0 +1,18 @@
+# Local-only notes. The decision record and eval proposal stay outside this folder.
+docs/private/
+private/
+
+# Secrets. The example file is safe to commit.
+.env
+.env.*
+!.env.example
+
+# Written when cdk synth succeeds. Not part of the project.
+.cursor/synth-stamp.json
+
+node_modules/
+cdk.out/
+dist/
+__pycache__/
+*.pyc
+.venv/
