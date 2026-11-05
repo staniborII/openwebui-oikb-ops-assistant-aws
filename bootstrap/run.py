@@ -1,4 +1,4 @@
-"""Configure Open WebUI, sync the oikb repository, and record the three answers.
+"""Configure Open WebUI, sync the oikb repository, and record the evaluation answers.
 
 Exit 0 when setup itself succeeded. A weak answer is recorded and still exits 0.
 Exit 1 when setup failed. The workflow then leaves the daemon stopped.
@@ -17,11 +17,19 @@ from datetime import datetime, timezone
 import boto3
 import requests
 
-QUESTIONS = [
+from bootstrap.context_budget import FILTER_ID, filter_source
+
+LIBRARY_QUESTIONS = [
     "Where in the code are the oikb commands defined?",
     "Where in the code are GitHub webhooks processed?",
     "Which connectors does oikb currently provide?",
 ]
+GITHUB_QUESTIONS = [
+    "A customer's Google Drive sync re-uploads a file on every run when the filename contains a slash. Is that a known issue on open-webui/oikb? Look up the open issues and cite the number.",
+    "What landed on main of open-webui/oikb in the latest commits? Name the commit shas and what each merge changed. Use GitHub, and cite the shas.",
+    "Which open pull requests on open-webui/oikb change sync behavior or ignore rules? Cite the numbers and titles.",
+]
+QUESTIONS = LIBRARY_QUESTIONS + GITHUB_QUESTIONS
 WRITE_MARKERS = (
     "create_",
     "update_",
@@ -44,9 +52,14 @@ WRITE_MARKERS = (
 )
 PATH_RE = re.compile(r"[\w./-]+\.(?:py|md|yml|yaml|toml|json|go|rs|ts|js)")
 CONNECTOR_RE = re.compile(r"github|gitlab|confluence|s3|gcs|azure|sharepoint|bookstack|bitbucket", re.I)
+GITHUB_RE = re.compile(r"#\d+|\bissues?/\d+\b|\b[0-9a-f]{12,40}\b", re.I)
 SYSTEM_PROMPT = (
     "You are the oikb Ops Assistant. Answer from the oikb knowledge base and the "
     "read-only GitHub tools. Name the file or connector you used."
+)
+ASSISTANT_DESCRIPTION = (
+    "Answers from the oikb knowledge base, and from read-only GitHub when a "
+    "question needs a live issue, commit, or pull request."
 )
 
 
@@ -74,19 +87,25 @@ def main() -> None:
         wait_until("database health", lambda: check_health(session, base), timeout=1200)
         token = wait_until("admin sign-in", lambda: sign_in(session, base), timeout=300)
         session.headers["Authorization"] = f"Bearer {token}"
+        enable_signup(session, base)
         api_key = ensure_api_key(session, base)
         knowledge = ensure_knowledge(session, base)
         kb_id = str(knowledge["id"])
+        share_knowledge(session, base, kb_id)
         store_secret(os.environ["WEBUI_API_KEY_SECRET_ARN"], api_key)
         store_secret(os.environ["KB_ID_SECRET_ARN"], kb_id)
-        server_id, tool_id = register_mcp(session, base, os.environ["MCP_URL"])
+        server_id, tool_id = register_github_mcp(session, base, os.environ["MCP_URL"])
         base_model = wait_until("base model", lambda: choose_base_model(session, base), timeout=300)
+        ensure_context_filter(session, base)
         import_assistant(session, base, base_model, knowledge, tool_id)
+        share_assistant(session, base)
         sync_repository(base, api_key, kb_id)
         wait_until("file processing", lambda: files_ready(session, base, kb_id), timeout=1800)
         report["knowledge_base_id"] = kb_id
         report["mcp_server_id"] = server_id
         report["base_model_id"] = base_model
+        # Chat reads the in-memory model list. This rebuilds it after the assistant was saved.
+        reload_models(session, base)
         report["questions"] = ask_questions(session, base, tool_id)
         report["infrastructure_ok"] = True
         report["evaluation_ok"] = all(item["passed"] for item in report["questions"])
@@ -162,6 +181,54 @@ def store_secret(arn: str, value: str) -> None:
     )
 
 
+PUBLIC_READ = [{"principal_type": "user", "principal_id": "*", "permission": "read"}]
+
+
+def enable_signup(session: requests.Session, base: str) -> None:
+    # The first admin account turns signup off. Put the .env choice back.
+    current = session.get(f"{base}/api/v1/auths/admin/config", timeout=30)
+    if current.status_code != 200:
+        raise SetupError(f"admin config returned {current.status_code}")
+    config = current.json()
+    if not isinstance(config, dict):
+        raise SetupError("admin config returned an unexpected body")
+    signup = os.environ.get("ENABLE_SIGNUP", "true").strip().lower() == "true"
+    role = os.environ.get("DEFAULT_USER_ROLE", "user").strip().lower()
+    if role not in ("pending", "user", "admin"):
+        raise SetupError(f"DEFAULT_USER_ROLE {role} is not pending, user, or admin")
+    config["ENABLE_SIGNUP"] = signup
+    config["DEFAULT_USER_ROLE"] = role
+    if config.get("I18N") is None:
+        config.pop("I18N", None)
+    updated = session.post(f"{base}/api/v1/auths/admin/config", json=config, timeout=30)
+    if updated.status_code != 200:
+        raise SetupError(f"admin config update returned {updated.status_code}: {_error_detail(updated)}")
+    saved = updated.json()
+    if not isinstance(saved, dict) or bool(saved.get("ENABLE_SIGNUP")) != signup or saved.get("DEFAULT_USER_ROLE") != role:
+        raise SetupError("signup settings were not saved")
+    logging.info("signup enabled=%s default role=%s", signup, role)
+
+
+def share_knowledge(session: requests.Session, base: str, kb_id: str) -> None:
+    updated = session.post(
+        f"{base}/api/v1/knowledge/{kb_id}/access/update",
+        json={"access_grants": PUBLIC_READ},
+        timeout=30,
+    )
+    if updated.status_code != 200:
+        raise SetupError(f"knowledge access update returned {updated.status_code}: {_error_detail(updated)}")
+
+
+def share_assistant(session: requests.Session, base: str) -> None:
+    updated = session.post(
+        f"{base}/api/v1/models/model/access/update",
+        json={"id": "oikb-ops-assistant", "access_grants": PUBLIC_READ},
+        timeout=30,
+    )
+    if updated.status_code != 200:
+        raise SetupError(f"model access update returned {updated.status_code}: {_error_detail(updated)}")
+
+
 def ensure_knowledge(session: requests.Session, base: str) -> dict:
     existing = session.get(f"{base}/api/v1/knowledge/", timeout=30)
     if existing.status_code != 200:
@@ -182,9 +249,9 @@ def ensure_knowledge(session: requests.Session, base: str) -> dict:
     raise SetupError("knowledge create returned no id")
 
 
-def register_mcp(session: requests.Session, base: str, mcp_url: str) -> tuple[str, str]:
+def register_github_mcp(session: requests.Session, base: str, github_mcp_url: str) -> tuple[str, str]:
     connection = {
-        "url": mcp_url,
+        "url": github_mcp_url,
         "path": "/",
         "type": "mcp",
         "auth_type": "none",
@@ -288,12 +355,89 @@ def choose_base_model(session: requests.Session, base: str) -> str:
     )
 
 
+def ensure_context_filter(session: requests.Session, base: str) -> None:
+    form = {
+        "id": FILTER_ID,
+        "name": "oikb context budget",
+        "content": filter_source(),
+        "meta": {
+            "description": "Keeps oikb Ops Assistant model requests inside the context window.",
+        },
+    }
+    current = session.get(f"{base}/api/v1/functions/id/{FILTER_ID}", timeout=30)
+    if current.status_code == 200:
+        saved = write_filter(session, base, form)
+    else:
+        created = session.post(f"{base}/api/v1/functions/create", json=form, timeout=60)
+        if created.status_code == 200:
+            saved = created.json()
+        elif created.status_code == 400 and _filter_id_taken(created):
+            saved = write_filter(session, base, form)
+        else:
+            raise SetupError(f"filter create returned {created.status_code}: {_error_detail(created)}")
+    saved = filter_flags(session, base, saved)
+    if saved.get("is_global") or not saved.get("is_active"):
+        raise SetupError("context filter must be active and limited to this assistant")
+    logging.info("context filter %s is active", FILTER_ID)
+
+
+def _error_detail(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        detail = payload.get("detail", payload)
+    else:
+        detail = response.text
+    return str(detail).replace("\n", " ")[:200]
+
+
+def _filter_id_taken(response: requests.Response) -> bool:
+    return "id is already registered" in _error_detail(response).lower()
+
+
+def write_filter(session: requests.Session, base: str, form: dict) -> dict:
+    updated = session.post(f"{base}/api/v1/functions/id/{FILTER_ID}/update", json=form, timeout=60)
+    if updated.status_code != 200:
+        raise SetupError(f"filter update returned {updated.status_code}")
+    body = updated.json()
+    if not isinstance(body, dict):
+        raise SetupError("filter update returned an unexpected body")
+    return body
+
+
+def filter_flags(session: requests.Session, base: str, saved: dict) -> dict:
+    if not isinstance(saved, dict):
+        raise SetupError("filter save returned an unexpected body")
+    if saved.get("is_global"):
+        saved = toggle_filter(session, base, "toggle/global")
+        if saved.get("is_global"):
+            raise SetupError("context filter is still global")
+    if not saved.get("is_active"):
+        saved = toggle_filter(session, base, "toggle")
+        if not saved.get("is_active"):
+            raise SetupError("context filter is not active")
+    return saved
+
+
+def toggle_filter(session: requests.Session, base: str, action: str) -> dict:
+    toggled = session.post(f"{base}/api/v1/functions/id/{FILTER_ID}/{action}", timeout=30)
+    if toggled.status_code != 200:
+        raise SetupError(f"filter {action} returned {toggled.status_code}")
+    body = toggled.json()
+    if not isinstance(body, dict):
+        raise SetupError(f"filter {action} returned an unexpected body")
+    return body
+
+
 def import_assistant(session: requests.Session, base: str, base_model: str, knowledge: dict, tool_id: str) -> None:
     model = {
         "id": "oikb-ops-assistant",
         "name": "oikb Ops Assistant",
         "base_model_id": base_model,
         "meta": {
+            "description": ASSISTANT_DESCRIPTION,
             "knowledge": [
                 {
                     "id": knowledge["id"],
@@ -302,6 +446,7 @@ def import_assistant(session: requests.Session, base: str, base_model: str, know
                 }
             ],
             "toolIds": [tool_id],
+            "filterIds": [FILTER_ID],
         },
         "params": {"system": SYSTEM_PROMPT},
     }
@@ -382,6 +527,22 @@ def file_status(item: dict) -> str:
     return str(item.get("status") or data.get("status") or meta.get("status") or "").lower()
 
 
+def reload_models(session: requests.Session, base: str) -> None:
+    try:
+        response = session.get(f"{base}/api/models", timeout=30)
+    except Exception as exc:
+        logging.warning("model list reload failed: %s", exc)
+        return
+    if response.status_code != 200:
+        logging.warning("model list reload returned %s", response.status_code)
+        return
+    ids = [str(item.get("id") or "") for item in as_list(response.json())]
+    if "oikb-ops-assistant" in ids:
+        logging.info("model list includes oikb-ops-assistant")
+        return
+    logging.warning("model list reload did not include oikb-ops-assistant")
+
+
 def ask_questions(session: requests.Session, base: str, tool_id: str) -> list[dict]:
     results = []
     for index, question in enumerate(QUESTIONS):
@@ -393,6 +554,8 @@ def ask_questions(session: requests.Session, base: str, tool_id: str) -> list[di
                     "messages": [{"role": "user", "content": question}],
                     "stream": False,
                     "tool_ids": [tool_id],
+                    # Native tool calling returns a tool call and no text when streaming is off.
+                    "params": {"function_calling": "legacy"},
                 },
                 timeout=180,
             )
@@ -401,13 +564,14 @@ def ask_questions(session: requests.Session, base: str, tool_id: str) -> list[di
             body = response.json()
             answer = str(((body.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
             cited = has_citation(body)
-            specific = bool(PATH_RE.search(answer)) or (index == 2 and bool(CONNECTOR_RE.search(answer)))
+            live = index >= len(LIBRARY_QUESTIONS)
+            specific = answer_is_specific(index, answer, live)
             results.append(
                 {
                     "question": question,
                     "answer": answer,
                     "citation": cited,
-                    "passed": cited and specific and bool(answer.strip()),
+                    "passed": specific and bool(answer.strip()) and (cited or live),
                 }
             )
         except Exception as exc:
@@ -421,6 +585,14 @@ def ask_questions(session: requests.Session, base: str, tool_id: str) -> list[di
                 }
             )
     return results
+
+
+def answer_is_specific(index: int, answer: str, live: bool) -> bool:
+    if live:
+        return bool(GITHUB_RE.search(answer))
+    if index == 2:
+        return bool(CONNECTOR_RE.search(answer))
+    return bool(PATH_RE.search(answer))
 
 
 def has_citation(payload: dict) -> bool:
@@ -441,16 +613,22 @@ def write_report(report: dict) -> None:
     stage = report["stage"]
     body = json.dumps(report, indent=2).encode("utf-8")
     summary = summary_text(report).encode("utf-8")
+    report_key = f"reports/{stage}/{stamp}.json"
+    pointer = json.dumps({"report": report_key}, indent=2).encode("utf-8")
     client = boto3.client("s3", region_name="us-east-1")
     bucket = os.environ["BUCKET"]
+    # The stamped object is the report. latest.json only names it, so the same
+    # JSON is not stored twice. The pointer is written after that object and
+    # before the summary, so a failed upload cannot name a missing report or
+    # leave the summary ahead of the pointer.
     pairs = [
-        (f"reports/{stage}/latest.json", body, "application/json"),
+        (report_key, body, "application/json"),
+        (f"reports/{stage}/latest.json", pointer, "application/json"),
         (f"reports/{stage}/latest.txt", summary, "text/plain"),
-        (f"reports/{stage}/{stamp}.json", body, "application/json"),
     ]
     for key, payload, content_type in pairs:
         client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType=content_type)
-    logging.info("wrote s3://%s/reports/%s/latest.json", bucket, stage)
+    logging.info("wrote s3://%s/%s", bucket, report_key)
 
 
 def summary_text(report: dict) -> str:

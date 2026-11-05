@@ -1,0 +1,17 @@
+---
+description: Least privilege for IAM when adding AWS resources
+globs: infra/**/*.ts
+alwaysApply: false
+---
+
+# IAM least privilege
+
+Grant the actions the caller makes, on that resource's ARN.
+
+- A secret write that only calls `PutSecretValue` gets that action only. Do not use `grantWrite`.
+- Do not copy another task's secret list. The migration task gets the database URL and the signing key. The website task does not get the GitHub token.
+- `ecs:StopTask` and `ecs:DescribeTasks` stay on `*`, with a deny unless `ecs:cluster` is this cluster's full ARN.
+- `iam:PassRole` is denied unless `iam:PassedToService` is `ecs-tasks.amazonaws.com`.
+- `cloudwatch:PutMetricData` stays on `*` with a `cloudwatch:namespace` condition.
+- A function URL stays IAM auth and is granted only to the role that signs the call.
+- Do not add a bucket statement for a permission CDK already adds, including load balancer access logs.

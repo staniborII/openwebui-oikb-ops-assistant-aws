@@ -19,10 +19,10 @@ export interface OrchestrationStackProps extends cdk.StackProps {
   config: StageConfig;
   cluster: ecs.ICluster;
   appSecurityGroup: ec2.ISecurityGroup;
-  webService: ecs.IBaseService;
-  daemonService: ecs.IBaseService;
-  vectorTask: ecs.TaskDefinition;
-  migrateTask: ecs.TaskDefinition;
+  openWebuiService: ecs.IBaseService;
+  oikbDaemonService: ecs.IBaseService;
+  pgvectorTask: ecs.TaskDefinition;
+  openWebuiMigrateTask: ecs.TaskDefinition;
   bootstrapTask: ecs.TaskDefinition;
   topic: sns.ITopic;
   siteUrl: string;
@@ -53,14 +53,14 @@ export class OrchestrationStack extends cdk.Stack {
     });
     failMail.next(failed);
 
-    const vectorFamily = stagified('chapters-vector', stage, false);
-    const migrateFamily = stagified('chapters-migrate', stage, false);
+    const pgvectorFamily = stagified('chapters-vector', stage, false);
+    const openWebuiMigrateFamily = stagified('chapters-migrate', stage, false);
     const bootstrapFamily = stagified('chapters-bootstrap', stage, false);
-    const vector = runFargate(this, 'CreateVectorExtension', props, latestTask(vectorFamily, props.vectorTask));
-    const migrate = runFargate(this, 'MigrateOpenWebui', props, latestTask(migrateFamily, props.migrateTask));
+    const pgvectorExtension = runFargate(this, 'CreateVectorExtension', props, latestTask(pgvectorFamily, props.pgvectorTask));
+    const openWebuiMigration = runFargate(this, 'MigrateOpenWebui', props, latestTask(openWebuiMigrateFamily, props.openWebuiMigrateTask));
     const bootstrap = runFargate(this, 'Bootstrap', props, latestTask(bootstrapFamily, props.bootstrapTask));
-    const startWeb = scale(this, 'StartOpenWebui', props, props.webService, 1);
-    const startDaemon = scale(this, 'StartDaemon', props, props.daemonService, 1);
+    const startOpenWebui = scale(this, 'StartOpenWebui', props, props.openWebuiService, 1);
+    const startOikbDaemon = scale(this, 'StartDaemon', props, props.oikbDaemonService, 1);
     const pause = new sfn.Wait(this, stagified('WaitForWeb', stage), {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
@@ -72,10 +72,10 @@ export class OrchestrationStack extends cdk.Stack {
       ),
     });
 
-    for (const step of [vector, migrate, startWeb, bootstrap, startDaemon]) {
+    for (const step of [pgvectorExtension, openWebuiMigration, startOpenWebui, bootstrap, startOikbDaemon]) {
       step.addCatch(failMail, { resultPath: '$.error' });
     }
-    vector.next(migrate).next(startWeb).next(pause).next(bootstrap).next(startDaemon).next(ready);
+    pgvectorExtension.next(openWebuiMigration).next(startOpenWebui).next(pause).next(bootstrap).next(startOikbDaemon).next(ready);
 
     const flowLogs = new logs.LogGroup(this, stagified('WorkflowLogs', stage), {
       logGroupName: `/chapters/${stage}/workflow`,
@@ -85,15 +85,33 @@ export class OrchestrationStack extends cdk.Stack {
     this.workflow = new sfn.StateMachine(this, stagified('Workflow', stage), {
       stateMachineName: stagified('chapters-bootstrap', stage, false),
       timeout: cdk.Duration.hours(2),
-      definitionBody: sfn.DefinitionBody.fromChainable(vector),
+      definitionBody: sfn.DefinitionBody.fromChainable(pgvectorExtension),
       logs: { destination: flowLogs, level: sfn.LogLevel.ERROR },
     });
     this.workflow.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ecs:UpdateService', 'ecs:DescribeServices'],
-        resources: [props.webService.serviceArn, props.daemonService.serviceArn],
+        resources: [props.openWebuiService.serviceArn, props.oikbDaemonService.serviceArn],
       }),
     );
+    // CDK allows StopTask and DescribeTasks on every task in the account, and
+    // PassRole to any service. The denies keep both on this cluster and ECS.
+    this.workflow.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.DENY,
+      actions: ['ecs:StopTask', 'ecs:DescribeTasks'],
+      resources: ['*'],
+      conditions: {
+        ArnNotEquals: { 'ecs:cluster': props.cluster.clusterArn },
+      },
+    }));
+    this.workflow.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.DENY,
+      actions: ['iam:PassRole'],
+      resources: ['*'],
+      conditions: {
+        StringNotEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' },
+      },
+    }));
 
     const rule = new events.Rule(this, stagified('OnThisStackComplete', stage), {
       ruleName: stagified('chapters-stack-complete', stage, false),

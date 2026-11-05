@@ -31,14 +31,15 @@ export interface AppStackProps extends cdk.StackProps {
 
 export class AppStack extends cdk.Stack {
   readonly cluster: ecs.Cluster;
-  readonly webService: ecs.FargateService;
-  readonly daemonService: ecs.FargateService;
-  readonly migrateTask: ecs.FargateTaskDefinition;
-  readonly mcpService: ecs.FargateService;
+  readonly openWebuiService: ecs.FargateService;
+  readonly oikbDaemonService: ecs.FargateService;
+  readonly openWebuiMigrateTask: ecs.FargateTaskDefinition;
+  readonly githubMcpService: ecs.FargateService;
   readonly loadBalancer: elbv2.ApplicationLoadBalancer;
-  readonly webTargetGroup: elbv2.ApplicationTargetGroup;
-  readonly notifyFunction: lambda.Function;
-  readonly vectorTask: ecs.FargateTaskDefinition;
+  readonly openWebuiTargetGroup: elbv2.ApplicationTargetGroup;
+  readonly oikbNotifyFunction: lambda.Function;
+  readonly slackFunction: lambda.Function;
+  readonly pgvectorTask: ecs.FargateTaskDefinition;
   readonly bootstrapTask: ecs.FargateTaskDefinition;
   readonly appSecurityGroup: ec2.SecurityGroup;
   readonly topic: sns.Topic;
@@ -52,8 +53,8 @@ export class AppStack extends cdk.Stack {
     const root = path.join(__dirname, '../..');
     this.siteUrl = `https://${config.webDomainName}`;
     const namespaceName = `${stagified('chapters', stage, false)}.local`;
-    const webUrl = `http://web.${namespaceName}:8080`;
-    const mcpUrl = `http://github-mcp.${namespaceName}:8082`;
+    const openWebuiUrl = `http://web.${namespaceName}:8080`;
+    const githubMcpUrl = `http://github-mcp.${namespaceName}:8082`;
 
     const signingKey = new secretsmanager.Secret(this, stagified('SigningKey', stage), {
       description: 'Open WebUI session signing key',
@@ -118,12 +119,12 @@ export class AppStack extends cdk.Stack {
     this.appSecurityGroup.addIngressRule(albSg, ec2.Port.tcp(8080), 'Load balancer to Open WebUI');
     this.appSecurityGroup.addIngressRule(this.appSecurityGroup, ec2.Port.tcp(8080), 'Bootstrap and daemon to Open WebUI');
 
-    const mcpSg = new ec2.SecurityGroup(this, stagified('McpSecurityGroup', stage), {
+    const githubMcpSecurityGroup = new ec2.SecurityGroup(this, stagified('McpSecurityGroup', stage), {
       vpc: props.vpc,
       description: 'GitHub MCP',
       allowAllOutbound: true,
     });
-    mcpSg.addIngressRule(this.appSecurityGroup, ec2.Port.tcp(8082), 'Open WebUI to GitHub MCP');
+    githubMcpSecurityGroup.addIngressRule(this.appSecurityGroup, ec2.Port.tcp(8082), 'Open WebUI to GitHub MCP');
 
     new ec2.CfnSecurityGroupIngress(this, stagified('DatabaseIngress', stage), {
       groupId: props.databaseSecurityGroup.securityGroupId,
@@ -134,32 +135,32 @@ export class AppStack extends cdk.Stack {
       description: 'App tasks to PostgreSQL',
     });
 
-    const webEnv = openWebuiEnvironment(config, props.bucket, 'false');
-    const webSecrets = openWebuiSecrets(signingKey, props.databaseUrl, openai, adminEmail, adminPassword);
+    const openWebuiEnv = openWebuiEnvironment(config, props.bucket, 'false');
+    const openWebuiTaskSecrets = openWebuiSecrets(signingKey, props.databaseUrl, openai, adminEmail, adminPassword);
     const platform: ecs.RuntimePlatform = {
       cpuArchitecture: ecs.CpuArchitecture.X86_64,
       operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
     };
 
-    const webTask = new ecs.FargateTaskDefinition(this, stagified('WebTask', stage), {
+    const openWebuiTask = new ecs.FargateTaskDefinition(this, stagified('WebTask', stage), {
       family: stagified('chapters-web', stage, false),
       cpu: 1024,
       memoryLimitMiB: 4096,
       runtimePlatform: platform,
     });
-    webTask.addContainer('web', {
+    openWebuiTask.addContainer('web', {
       image: ecs.ContainerImage.fromRegistry(config.openWebuiImage),
-      environment: webEnv,
-      secrets: webSecrets,
+      environment: openWebuiEnv,
+      secrets: openWebuiTaskSecrets,
       logging: ecs.LogDrivers.awsLogs({ logGroup: groups.web, streamPrefix: 'web' }),
       portMappings: [{ containerPort: 8080, protocol: ecs.Protocol.TCP }],
     });
-    props.bucket.grantReadWrite(webTask.taskRole);
+    props.bucket.grantReadWrite(openWebuiTask.taskRole);
 
-    this.webService = new ecs.FargateService(this, stagified('WebService', stage), {
+    this.openWebuiService = new ecs.FargateService(this, stagified('WebService', stage), {
       cluster: this.cluster,
       serviceName: stagified('web', stage, false),
-      taskDefinition: webTask,
+      taskDefinition: openWebuiTask,
       desiredCount: 0,
       assignPublicIp: false,
       securityGroups: [this.appSecurityGroup],
@@ -194,11 +195,6 @@ export class AppStack extends cdk.Stack {
       lifecycleRules: [{ expiration: cdk.Duration.days(14) }],
     });
     this.loadBalancer.logAccessLogs(accessLogs, 'alb');
-    accessLogs.addToResourcePolicy(new iam.PolicyStatement({
-      principals: [new iam.ServicePrincipal('logdelivery.elasticloadbalancing.amazonaws.com')],
-      actions: ['s3:PutObject'],
-      resources: [accessLogs.arnForObjects(`alb/AWSLogs/${cdk.Aws.ACCOUNT_ID}/*`)],
-    }));
     this.loadBalancer.addListener('Http', {
       port: 80,
       protocol: elbv2.ApplicationProtocol.HTTP,
@@ -213,10 +209,10 @@ export class AppStack extends cdk.Stack {
       protocol: elbv2.ApplicationProtocol.HTTPS,
       certificates: [elbv2.ListenerCertificate.fromArn(config.certificateArn)],
     });
-    this.webTargetGroup = https.addTargets('Web', {
+    this.openWebuiTargetGroup = https.addTargets('Web', {
       port: 8080,
       protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [this.webService],
+      targets: [this.openWebuiService],
       healthCheck: {
         path: '/health/db',
         healthyHttpCodes: '200',
@@ -238,24 +234,24 @@ export class AppStack extends cdk.Stack {
       target: route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(this.loadBalancer)),
     });
 
-    const mcpTask = new ecs.FargateTaskDefinition(this, stagified('McpTask', stage), {
+    const githubMcpTask = new ecs.FargateTaskDefinition(this, stagified('McpTask', stage), {
       family: stagified('chapters-mcp', stage, false),
       cpu: 512,
       memoryLimitMiB: 1024,
       runtimePlatform: platform,
     });
-    const mcp = mcpTask.addContainer('mcp', {
-      image: ecs.ContainerImage.fromRegistry(config.mcpImage),
+    const githubMcp = githubMcpTask.addContainer('mcp', {
+      image: ecs.ContainerImage.fromRegistry(config.githubMcpImage),
       command: ['http', '--read-only', '--listen-host', '127.0.0.1', '--port', '8083'],
       environment: { GITHUB_READ_ONLY: '1' },
       logging: ecs.LogDrivers.awsLogs({ logGroup: groups.mcp, streamPrefix: 'mcp' }),
     });
-    const mcpProxyImage = new ecrAssets.DockerImageAsset(this, stagified('McpProxyImage', stage), {
-      directory: path.join(root, 'containers', 'mcp-proxy'),
+    const githubMcpProxyImage = new ecrAssets.DockerImageAsset(this, stagified('McpProxyImage', stage), {
+      directory: path.join(root, 'containers', 'github-mcp-proxy'),
       file: 'Dockerfile',
     });
-    const mcpProxy = mcpTask.addContainer('mcp-proxy', {
-      image: ecs.ContainerImage.fromDockerImageAsset(mcpProxyImage),
+    const githubMcpProxy = githubMcpTask.addContainer('mcp-proxy', {
+      image: ecs.ContainerImage.fromDockerImageAsset(githubMcpProxyImage),
       secrets: {
         GITHUB_PERSONAL_ACCESS_TOKEN: ecs.Secret.fromSecretsManager(github),
       },
@@ -274,17 +270,17 @@ export class AppStack extends cdk.Stack {
         startPeriod: cdk.Duration.seconds(20),
       },
     });
-    mcpProxy.addContainerDependencies({
-      container: mcp,
+    githubMcpProxy.addContainerDependencies({
+      container: githubMcp,
       condition: ecs.ContainerDependencyCondition.START,
     });
-    this.mcpService = new ecs.FargateService(this, stagified('McpService', stage), {
+    this.githubMcpService = new ecs.FargateService(this, stagified('McpService', stage), {
       cluster: this.cluster,
       serviceName: stagified('mcp', stage, false),
-      taskDefinition: mcpTask,
+      taskDefinition: githubMcpTask,
       desiredCount: 1,
       assignPublicIp: false,
-      securityGroups: [mcpSg],
+      securityGroups: [githubMcpSecurityGroup],
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       circuitBreaker: { rollback: true },
       minHealthyPercent: 0,
@@ -292,33 +288,37 @@ export class AppStack extends cdk.Stack {
         name: 'github-mcp',
         cloudMapNamespace: namespace,
         dnsRecordType: servicediscovery.DnsRecordType.A,
-        container: mcpProxy,
+        container: githubMcpProxy,
         containerPort: 8082,
       },
     });
 
-    this.migrateTask = new ecs.FargateTaskDefinition(this, stagified('MigrateTask', stage), {
+    this.openWebuiMigrateTask = new ecs.FargateTaskDefinition(this, stagified('MigrateTask', stage), {
       family: stagified('chapters-migrate', stage, false),
       cpu: 1024,
       memoryLimitMiB: 4096,
       runtimePlatform: platform,
     });
-    this.migrateTask.addContainer('migrate', {
+    this.openWebuiMigrateTask.addContainer('migrate', {
       image: ecs.ContainerImage.fromRegistry(config.openWebuiImage),
       entryPoint: ['python'],
       command: ['-c', 'import open_webui.config'],
       environment: openWebuiEnvironment(config, props.bucket, 'true'),
-      secrets: webSecrets,
+      secrets: {
+        WEBUI_SECRET_KEY: ecs.Secret.fromSecretsManager(signingKey),
+        DATABASE_URL: ecs.Secret.fromSecretsManager(props.databaseUrl),
+        PGVECTOR_DB_URL: ecs.Secret.fromSecretsManager(props.databaseUrl),
+      },
       logging: ecs.LogDrivers.awsLogs({ logGroup: groups.migrate, streamPrefix: 'migrate' }),
     });
 
-    this.vectorTask = new ecs.FargateTaskDefinition(this, stagified('VectorTask', stage), {
+    this.pgvectorTask = new ecs.FargateTaskDefinition(this, stagified('VectorTask', stage), {
       family: stagified('chapters-vector', stage, false),
       cpu: 256,
       memoryLimitMiB: 512,
       runtimePlatform: platform,
     });
-    this.vectorTask.addContainer('vector', {
+    this.pgvectorTask.addContainer('vector', {
       image: ecs.ContainerImage.fromRegistry('public.ecr.aws/docker/library/postgres:16'),
       entryPoint: ['sh', '-c'],
       command: ['psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector"'],
@@ -341,10 +341,11 @@ export class AppStack extends cdk.Stack {
       image: ecs.ContainerImage.fromDockerImageAsset(bootstrapImage),
       command: ['setup'],
       environment: {
-        WEBUI_BASE_URL: webUrl,
-        MCP_URL: mcpUrl,
+        WEBUI_BASE_URL: openWebuiUrl,
+        MCP_URL: githubMcpUrl,
         STAGE: stage,
         BUCKET: props.bucket.bucketName,
+        ...signupSettings(),
         WEBUI_API_KEY_SECRET_ARN: webuiApiKey.secretArn,
         KB_ID_SECRET_ARN: knowledgeBaseId.secretArn,
       },
@@ -355,16 +356,38 @@ export class AppStack extends cdk.Stack {
       },
       logging: ecs.LogDrivers.awsLogs({ logGroup: groups.bootstrap, streamPrefix: 'bootstrap' }),
     });
-    webuiApiKey.grantWrite(this.bootstrapTask.taskRole);
-    knowledgeBaseId.grantWrite(this.bootstrapTask.taskRole);
+    grantPutSecretValue(webuiApiKey, this.bootstrapTask.taskRole);
+    grantPutSecretValue(knowledgeBaseId, this.bootstrapTask.taskRole);
     props.bucket.grantPut(this.bootstrapTask.taskRole, 'reports/*');
 
     this.topic = new sns.Topic(this, stagified('Alerts', stage), {
       topicName: stagified('chapters-alerts', stage, false),
     });
     this.topic.addSubscription(new subscriptions.EmailSubscription(config.snsEmail));
+    const slackWebhook = plainSecret(
+      this,
+      stagified('SlackWebhook', stage),
+      requireSlackWebhook(),
+      'Slack incoming webhook for alerts',
+      keep,
+    );
+    const slackLogs = new logs.LogGroup(this, stagified('SlackLogs', stage), {
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: keep,
+    });
+    this.slackFunction = new lambda.Function(this, stagified('Slack', stage), {
+      functionName: stagified('chapters-slack', stage, false),
+      runtime: lambda.Runtime.NODEJS_24_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(15),
+      logGroup: slackLogs,
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/slack')),
+      environment: { WEBHOOK_SECRET_ARN: slackWebhook.secretArn },
+    });
+    slackWebhook.grantRead(this.slackFunction);
+    this.topic.addSubscription(new subscriptions.LambdaSubscription(this.slackFunction));
 
-    this.notifyFunction = new lambda.Function(this, stagified('Notify', stage), {
+    this.oikbNotifyFunction = new lambda.Function(this, stagified('Notify', stage), {
       functionName: stagified('chapters-oikb-notify', stage, false),
       runtime: lambda.Runtime.NODEJS_24_X,
       handler: 'index.handler',
@@ -372,27 +395,27 @@ export class AppStack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/notify')),
       environment: { TOPIC_ARN: this.topic.topicArn },
     });
-    this.topic.grantPublish(this.notifyFunction);
-    const notifyUrl = this.notifyFunction.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+    this.topic.grantPublish(this.oikbNotifyFunction);
+    const oikbNotifyUrl = this.oikbNotifyFunction.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
     const oikbImage = new ecrAssets.DockerImageAsset(this, stagified('OikbImage', stage), {
       directory: path.join(root, 'containers', 'oikb'),
       file: 'Dockerfile',
       buildArgs: { OIKB_IMAGE: config.oikbImage },
     });
-    const daemonTask = new ecs.FargateTaskDefinition(this, stagified('DaemonTask', stage), {
+    const oikbDaemonTask = new ecs.FargateTaskDefinition(this, stagified('DaemonTask', stage), {
       family: stagified('chapters-daemon', stage, false),
       cpu: 512,
       memoryLimitMiB: 1024,
       runtimePlatform: platform,
     });
-    const notifyProxyImage = new ecrAssets.DockerImageAsset(this, stagified('NotifyProxyImage', stage), {
+    const oikbNotifyProxyImage = new ecrAssets.DockerImageAsset(this, stagified('NotifyProxyImage', stage), {
       directory: path.join(root, 'containers', 'notify-proxy'),
       file: 'Dockerfile',
     });
-    const notifyProxy = daemonTask.addContainer('notify-proxy', {
-      image: ecs.ContainerImage.fromDockerImageAsset(notifyProxyImage),
+    const oikbNotifyProxy = oikbDaemonTask.addContainer('notify-proxy', {
+      image: ecs.ContainerImage.fromDockerImageAsset(oikbNotifyProxyImage),
       environment: {
-        FUNCTION_URL: notifyUrl.url,
+        FUNCTION_URL: oikbNotifyUrl.url,
         AWS_REGION: 'us-east-1',
       },
       logging: ecs.LogDrivers.awsLogs({ logGroup: groups.daemon, streamPrefix: 'notify-proxy' }),
@@ -409,10 +432,10 @@ export class AppStack extends cdk.Stack {
         startPeriod: cdk.Duration.seconds(20),
       },
     });
-    const daemon = daemonTask.addContainer('daemon', {
+    const oikbDaemon = oikbDaemonTask.addContainer('daemon', {
       image: ecs.ContainerImage.fromDockerImageAsset(oikbImage),
       environment: {
-        OPEN_WEBUI_URL: webUrl,
+        OPEN_WEBUI_URL: openWebuiUrl,
         NOTIFY_URL: 'http://127.0.0.1:8089',
       },
       secrets: {
@@ -424,15 +447,15 @@ export class AppStack extends cdk.Stack {
       logging: ecs.LogDrivers.awsLogs({ logGroup: groups.daemon, streamPrefix: 'daemon' }),
       portMappings: [{ containerPort: 8080, protocol: ecs.Protocol.TCP }],
     });
-    daemon.addContainerDependencies({
-      container: notifyProxy,
+    oikbDaemon.addContainerDependencies({
+      container: oikbNotifyProxy,
       condition: ecs.ContainerDependencyCondition.HEALTHY,
     });
     const syncMetricsImage = new ecrAssets.DockerImageAsset(this, stagified('SyncMetricsImage', stage), {
       directory: path.join(root, 'containers', 'sync-metrics'),
       file: 'Dockerfile',
     });
-    daemonTask.addContainer('sync-metrics', {
+    oikbDaemonTask.addContainer('sync-metrics', {
       image: ecs.ContainerImage.fromDockerImageAsset(syncMetricsImage),
       environment: {
         STAGE: stage,
@@ -452,16 +475,16 @@ export class AppStack extends cdk.Stack {
         startPeriod: cdk.Duration.seconds(20),
       },
     });
-    daemonTask.addToTaskRolePolicy(new iam.PolicyStatement({
+    oikbDaemonTask.addToTaskRolePolicy(new iam.PolicyStatement({
       actions: ['cloudwatch:PutMetricData'],
       resources: ['*'],
       conditions: { StringEquals: { 'cloudwatch:namespace': 'Chapters/Oikb' } },
     }));
-    notifyUrl.grantInvokeUrl(daemonTask.taskRole);
-    this.daemonService = new ecs.FargateService(this, stagified('DaemonService', stage), {
+    oikbNotifyUrl.grantInvokeUrl(oikbDaemonTask.taskRole);
+    this.oikbDaemonService = new ecs.FargateService(this, stagified('DaemonService', stage), {
       cluster: this.cluster,
       serviceName: stagified('daemon', stage, false),
-      taskDefinition: daemonTask,
+      taskDefinition: oikbDaemonTask,
       desiredCount: 0,
       assignPublicIp: false,
       securityGroups: [this.appSecurityGroup],
@@ -474,6 +497,28 @@ export class AppStack extends cdk.Stack {
     cdk.Tags.of(this).add('Service', config.service);
     cdk.Tags.of(this).add('Owner', config.owner);
   }
+}
+
+function grantPutSecretValue(secret: secretsmanager.ISecret, grantee: iam.IGrantable): void {
+  grantee.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+    actions: ['secretsmanager:PutSecretValue'],
+    resources: [secret.secretArn],
+  }));
+}
+
+function requireSlackWebhook(): string {
+  const value = requireEnv('SLACK_WEBHOOK_URL').trim();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('SLACK_WEBHOOK_URL must be an https://hooks.slack.com/services/ URL.');
+  }
+  const pathOk = url.pathname.startsWith('/services/') && url.pathname.length > '/services/'.length;
+  if (url.protocol !== 'https:' || url.hostname !== 'hooks.slack.com' || !pathOk || url.username || url.password || url.search || url.hash) {
+    throw new Error('SLACK_WEBHOOK_URL must be an https://hooks.slack.com/services/ URL.');
+  }
+  return value;
 }
 
 function plainSecret(
@@ -490,15 +535,29 @@ function plainSecret(
   });
 }
 
+function signupSettings(): { ENABLE_SIGNUP: string; DEFAULT_USER_ROLE: string } {
+  const signup = requireEnv('ENABLE_SIGNUP').trim().toLowerCase();
+  const role = requireEnv('DEFAULT_USER_ROLE').trim().toLowerCase();
+  if (signup !== 'true' && signup !== 'false') {
+    throw new Error('ENABLE_SIGNUP must be true or false.');
+  }
+  if (role !== 'pending' && role !== 'user' && role !== 'admin') {
+    throw new Error('DEFAULT_USER_ROLE must be pending, user, or admin.');
+  }
+  return { ENABLE_SIGNUP: signup, DEFAULT_USER_ROLE: role };
+}
+
 function openWebuiEnvironment(config: StageConfig, bucket: s3.IBucket, migrations: string): Record<string, string> {
   return {
     HOST: '0.0.0.0',
     PORT: '8080',
     UVICORN_WORKERS: '1',
     WEBUI_URL: `https://${config.webDomainName}`,
+    CORS_ALLOW_ORIGIN: `https://${config.webDomainName}`,
     ENABLE_DB_MIGRATIONS: migrations,
     ENABLE_OLLAMA_API: 'false',
     ENABLE_API_KEYS: 'true',
+    ...signupSettings(),
     VECTOR_DB: 'pgvector',
     PGVECTOR_CREATE_EXTENSION: 'false',
     OPENAI_API_BASE_URL: 'https://api.openai.com/v1',

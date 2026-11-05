@@ -4,12 +4,12 @@ Deploy the five stacks, confirm the SNS email, and wait for the ready message. T
 
 ## Before the first deploy
 
-1. Put `OPENAI_API_KEY`, `GITHUB_TOKEN`, `WEBUI_ADMIN_EMAIL`, and `WEBUI_ADMIN_PASSWORD` in `infra/.env`. Do not commit that file. `GITHUB_TOKEN` is a fine-grained token with Contents, Issues, and Pull requests set to Read.
-2. In `infra/config.dev.yaml`, set `WEB_DOMAIN_NAME`, the FlexxyDrive hosted zone, a certificate ARN in `us-east-1` that covers that name, and a real `SNS_EMAIL`. Confirm that certificate before a real deploy. `ALLOWED_IPS` is `0.0.0.0/0` until you replace it.
-3. Start Docker. The bootstrap, oikb, notify-proxy, mcp-proxy, and sync-metrics images are built during deploy.
+1. Put `OPENAI_API_KEY`, `GITHUB_TOKEN`, `WEBUI_ADMIN_EMAIL`, `WEBUI_ADMIN_PASSWORD`, `SLACK_WEBHOOK_URL`, `ENABLE_SIGNUP`, and `DEFAULT_USER_ROLE` in `infra/.env`. Do not commit that file. `GITHUB_TOKEN` is a fine-grained token with Contents, Issues, and Pull requests set to Read. `SLACK_WEBHOOK_URL` is the Slack incoming webhook for the alerts channel. `ENABLE_SIGNUP=true` and `DEFAULT_USER_ROLE=user` let other people create an account and use it immediately.
+2. In `infra/config.dev.yaml`, set `WEB_DOMAIN_NAME`, `DOMAIN_HOSTED_ZONE_ID`, and `DOMAIN_HOSTED_ZONE_NAME` for the flexxytech.com zone, a certificate ARN in `us-east-1` that covers that name, and a real `SNS_EMAIL`. Confirm that certificate before a real deploy. `ALLOWED_IPS` is `0.0.0.0/0` until you replace it.
+3. Start Docker. The bootstrap, oikb, notify-proxy, github-mcp-proxy, and sync-metrics images are built during deploy.
 4. Bootstrap the account once if this account and region have never run CDK: `npx cdk bootstrap aws://<account>/us-east-1` from `infra/`.
 
-Run `npx cdk synth` from `infra/` after any change under `infra/`, `bootstrap/`, or `containers/`. Synth reads the four values from the environment, using `infra/.env` when they are not already set. Deploy only after that synth succeeds.
+Run `npx cdk synth` from `infra/` after any change under `infra/`, `bootstrap/`, or `containers/`. Synth reads those values from the environment, using `infra/.env` when they are not already set. Deploy only after that synth succeeds.
 
 ## Deploy
 
@@ -19,7 +19,7 @@ From `infra/`:
 npx cdk deploy --all
 ```
 
-The stack reads `OPENAI_API_KEY`, `GITHUB_TOKEN`, `WEBUI_ADMIN_EMAIL`, and `WEBUI_ADMIN_PASSWORD` from the environment and passes them to the tasks that need them. The default stage is `dev` (`infra/cdk.json`).
+The stack reads `OPENAI_API_KEY`, `GITHUB_TOKEN`, `WEBUI_ADMIN_EMAIL`, and `WEBUI_ADMIN_PASSWORD` from the environment and passes them to the tasks that need them. `ENABLE_SIGNUP` and `DEFAULT_USER_ROLE` are passed to Open WebUI as plain settings. `SLACK_WEBHOOK_URL` is stored for the Slack Lambda. The default stage is `dev` (`infra/cdk.json`).
 
 For prod:
 
@@ -31,13 +31,13 @@ The stacks deploy in order: Network, Data, App, Orchestration, Monitoring.
 
 ## After the command returns
 
-1. Confirm the SNS subscription email. Until that confirmation, the ready mail, the setup failure mail, and the health alarms do not arrive. This click cannot be done in code.
+1. Confirm the SNS subscription email. Until that confirmation, the ready mail, the setup failure mail, and the health alarms do not arrive. This click cannot be done in code. Slack posts those same notes as soon as the deploy finishes. The monthly budget mail stays email only.
 2. Confirm the separate AWS Budgets email. In Billing, activate the `Service` cost allocation tag once. Until that tag is active, the monthly budget email sees no spend.
 3. Wait for the ready email. It contains the site URL. It does not contain the admin password. Sign in with `WEBUI_ADMIN_EMAIL` and `WEBUI_ADMIN_PASSWORD` from `.env`.
 4. Open the CloudWatch dashboard named in the monitoring stack output. Health alarms arrive as short sentences: what is wrong, the stage, and the time. A later mail says the same thing has recovered.
-5. If a failure email arrives, read the stage, the reason, and the log group it names. The daemon stays off. A setup failure can also send a short alarm that points at that email.
+5. If a failure email arrives, read the stage, the reason, and the log group it names. oikb-daemon stays off. A setup failure can also send a short alarm that points at that email.
 
-The workflow creates the vector extension, migrates Open WebUI, starts one website task, waits 30 seconds, runs bootstrap, starts the daemon, then sends the ready mail. Bootstrap polls `/health/db` for up to 20 minutes. Bootstrap's report is at `reports/<stage>/latest.json` in the stage bucket. How to read it is in the [eval proposal](eval-proposal.md).
+The workflow creates the vector extension, migrates Open WebUI, starts one website task, waits 30 seconds, runs bootstrap, starts oikb-daemon, then sends the ready mail. Bootstrap polls `/health/db` for up to 20 minutes. Bootstrap writes the report to `reports/<stage>/<stamp>.json` in the stage bucket. `reports/<stage>/latest.json` names that object. How to read it is in the [eval proposal](eval-proposal.md).
 
 The setup workflow starts the vector, migrate, and bootstrap tasks by family name. A new image updates the app stack and does not start the workflow by itself. After that deploy, start the state machine `chapters-bootstrap-<stage>` once. Bootstrap reuses the same knowledge base and assistant.
 

@@ -8,19 +8,17 @@ The assistant may look at GitHub for a known bug or a recent change. The same sy
 
 ## Options
 
-Point Open WebUI at GitHub's hosted MCP endpoint, and store the token in the website.
+1. Point Open WebUI at GitHub's hosted MCP endpoint, and store the token in the website.
+2. Run github-mcp ourselves with a token that can write, and trust the prompt not to call the write tools.
+3. Run the official server as a private task, started read-only, with a token that can only read, and stop setup if a write tool is still listed.
 
-Run the official MCP server ourselves with a token that can write, and trust the prompt not to call the write tools.
+## Decision (option 3)
 
-Run the official server as a private task, started read-only, with a token that can only read, and stop setup if a write tool is still listed.
+Run the official github-mcp server as a private task, started with read-only flag and with a github token that can only read, and stop setup in the bootstrap if a write tool is still listed.
 
-## Decision
+It is a private Fargate service, not on the load balancer. Open WebUI reaches github-mcp-proxy at `http://github-mcp.chapters-<stage>.local:8082`. The image is `ghcr.io/github/github-mcp-server:v2.0.3`, a release that honors `--read-only` in HTTP mode. The command is `http --read-only --listen-host 127.0.0.1 --port 8083`, with `GITHUB_READ_ONLY=1`. That HTTP mode does not read the token from the environment. It expects `Authorization: Bearer` on each request. `containers/github-mcp-proxy` listens on port 8082 in the same task, adds that header from the secret, and forwards to github-mcp on `127.0.0.1:8083`. The token comes from `.env` through Secrets Manager and is injected only into github-mcp-proxy.
 
-The GitHub helper cannot write, and the token never sits in the website.
-
-It is a private Fargate service, not on the load balancer. Open WebUI reaches it at `http://github-mcp.chapters-<stage>.local:8082`. The image is `ghcr.io/github/github-mcp-server:v2.0.3`, a release that honors `--read-only` in HTTP mode. The command is `http --read-only --listen-host 127.0.0.1 --port 8083`, with `GITHUB_READ_ONLY=1`. That HTTP mode does not read the token from the environment. It expects `Authorization: Bearer` on each request. `containers/mcp-proxy` listens on port 8082 in the same task, adds that header from the secret, and forwards to `127.0.0.1:8083`. The token comes from `.env` through Secrets Manager and is injected only into that sidecar.
-
-The token is fine-grained. Contents, Issues, and Pull requests are Read, and it can read public repositories. Bootstrap asks Open WebUI for the tool list and fails setup if the list is empty or any tool name looks like a write. Bootstrap and the daemon receive the same secret as `GITHUB_TOKEN`, so copying `open-webui/oikb` is not stopped by GitHub's limit of 60 anonymous requests per hour from the NAT address. The website task does not receive it.
+The token is fine-grained. Contents, Issues, and Pull requests are Read, and it can read public repositories. Bootstrap asks Open WebUI for the tool list and fails setup if the list is empty or any tool name looks like a write. Bootstrap and oikb-daemon receive the same secret as `GITHUB_TOKEN`, so copying `open-webui/oikb` is not stopped by GitHub's limit of 60 anonymous requests per hour from the NAT address. The website task does not receive it.
 
 ## Trade-off
 

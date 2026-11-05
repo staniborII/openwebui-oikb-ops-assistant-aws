@@ -9,5 +9,6 @@ These pages describe the system that the CDK app deploys. They are the write-up 
 | [Decision record](decision-record.md) | One page. Freshness, access scope, failure detection, and scope |
 | [ADRs](adr/0001-freshness.md) | The same four decisions, with the options written out |
 | [Eval proposal](eval-proposal.md) | How assistant answers are judged |
+| [Tests](tests.md) | The automated checks, and what each one covers |
 | [Deploy](deploy.md) | The one deploy command and the single email confirmation |
 | [Reference](reference.md) | Stacks, images, ports, and where each kind of data is stored |

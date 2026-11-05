@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "build": "tsc --noEmit",
-    "test": "node --require ts-node/register --test test/notify.test.js test/resource-names.test.ts",
+    "test": "node --require ts-node/register --test test/notify.test.js test/slack.test.js test/resource-names.test.ts",
     "synth": "cdk synth",
     "deploy": "cdk deploy --all"
   },

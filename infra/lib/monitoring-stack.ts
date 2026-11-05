@@ -1,5 +1,5 @@
 // Alarms, plain-language alarm mail, dashboard, monthly budget, and the request rate limit.
-// Sync graphs read Chapters/Oikb, which the daemon task publishes.
+// The dashboard reads Chapters/Oikb, which the daemon task publishes.
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
 import * as budgets from 'aws-cdk-lib/aws-budgets';
@@ -23,13 +23,14 @@ export interface MonitoringStackProps extends cdk.StackProps {
   config: StageConfig;
   topic: sns.ITopic;
   cluster: ecs.ICluster;
-  webService: ecs.IBaseService;
-  daemonService: ecs.IBaseService;
-  mcpService: ecs.IBaseService;
-  webTargetGroup: elbv2.IApplicationTargetGroup;
+  openWebuiService: ecs.IBaseService;
+  oikbDaemonService: ecs.IBaseService;
+  githubMcpService: ecs.IBaseService;
+  openWebuiTargetGroup: elbv2.IApplicationTargetGroup;
   loadBalancer: elbv2.IApplicationLoadBalancer;
   database: rds.IDatabaseInstance;
-  notifyFunction: lambda.IFunction;
+  oikbNotifyFunction: lambda.IFunction;
+  slackFunction: lambda.IFunction;
   workflow: sfn.IStateMachine;
 }
 
@@ -59,31 +60,41 @@ export class MonitoringStack extends cdk.Stack {
     props.topic.grantPublish(mailer);
     const mail = new actions.LambdaAction(mailer, { useUniquePermissionId: true });
 
-    const webMissing = serviceMissing(props.cluster, props.webService, minute);
-    const daemonMissing = serviceMissing(props.cluster, props.daemonService, minute);
-    const mcpMissing = serviceMissing(props.cluster, props.mcpService, minute);
+    const openWebuiMissing = serviceMissing(props.cluster, props.openWebuiService, minute);
+    const oikbDaemonMissing = serviceMissing(props.cluster, props.oikbDaemonService, minute);
+    const githubMcpMissing = serviceMissing(props.cluster, props.githubMcpService, minute);
     const websiteDown = new cloudwatch.MathExpression({
-      expression: 'IF(desired > 0 AND running >= desired AND healthy < 1, 1, 0)',
+      expression: 'IF(live >= 1 AND FILL(healthy, 0) < 1, 1, 0)',
       usingMetrics: {
-        desired: taskCount(props.cluster, props.webService, 'DesiredTaskCount', 'Maximum', minute),
-        running: taskCount(props.cluster, props.webService, 'RunningTaskCount', 'Minimum', minute),
-        healthy: props.webTargetGroup.metrics.healthyHostCount({
+        live: taskCount(props.cluster, props.openWebuiService, 'LiveTaskCount', 'Minimum', minute),
+        healthy: props.openWebuiTargetGroup.metrics.healthyHostCount({
           period: minute,
-          statistic: 'Sum',
+          statistic: 'Minimum',
           label: 'Healthy website tasks',
         }),
       },
       period: minute,
-      label: 'Website is up but failing its health check',
+      label: 'Website task is up but failing its health check',
+    });
+    const daemonSilent = new cloudwatch.MathExpression({
+      expression: 'IF(live >= 1 AND FILL(report, 0) < 1, 1, 0)',
+      usingMetrics: {
+        live: taskCount(props.cluster, props.oikbDaemonService, 'LiveTaskCount', 'Minimum', minute),
+        report: oikbMetric(stage, 'SyncReport', 'Sync status was reported', 'Maximum', {}, minute),
+      },
+      period: minute,
+      label: 'Sync daemon is up but not reporting',
     });
 
     watch(this, stage, mail, 'WebsiteDown', `${stage} website`, websiteDown, 15,
-      'The website is supposed to be running, but its health check is failing. People cannot use the site. Check the web service logs.');
-    watch(this, stage, mail, 'WebsiteTaskMissing', `${stage} website task`, webMissing, 15,
-      'The website is supposed to have a task, and that task is not running. Check the web service in ECS.');
-    watch(this, stage, mail, 'DaemonTaskMissing', `${stage} sync daemon`, daemonMissing, 15,
-      'The sync daemon is supposed to be running, and its task is not. The knowledge base may stop updating. Check the daemon service in ECS.');
-    watch(this, stage, mail, 'GithubHelperDown', `${stage} GitHub helper`, mcpMissing, 15,
+      'The website task is running, but its health check is failing. People cannot use the site. Check the web service logs.');
+    watch(this, stage, mail, 'WebsiteTaskMissing', `${stage} website task`, openWebuiMissing, 15,
+      'The website has no running task. If setup has not finished, wait for the ready email. If the site was already up, check the web service in ECS.');
+    watch(this, stage, mail, 'DaemonTaskMissing', `${stage} sync daemon`, oikbDaemonMissing, 15,
+      'The sync daemon has no running task. If setup has not finished, wait for the ready email. If it was already up, the knowledge base may stop updating. Check the daemon service in ECS.');
+    watch(this, stage, mail, 'DaemonSilent', `${stage} sync status`, daemonSilent, 5,
+      'The sync daemon task is running, but it has not reported its status for five minutes. The knowledge base may stop updating. Check the daemon logs.');
+    watch(this, stage, mail, 'GithubHelperDown', `${stage} GitHub helper`, githubMcpMissing, 15,
       'The private GitHub helper should always have one task. Questions that need a live look at GitHub will fail. Check the MCP service in ECS.');
     watch(this, stage, mail, 'DatabaseDiskLow', `${stage} database disk`,
       props.database.metricFreeStorageSpace({ period: cdk.Duration.minutes(5), statistic: 'Minimum', label: 'Free disk (bytes)' }),
@@ -102,9 +113,24 @@ export class MonitoringStack extends cdk.Stack {
       'More than 80 connections are open. This small database starts refusing new ones well before 100, and the site will fail to load.',
       80);
     watch(this, stage, mail, 'SyncAlertFailing', `${stage} sync alert`,
-      props.notifyFunction.metricErrors({ period: cdk.Duration.minutes(5), statistic: 'Sum', label: 'Sync alert errors' }),
+      props.oikbNotifyFunction.metricErrors({ period: cdk.Duration.minutes(5), statistic: 'Sum', label: 'Sync alert errors' }),
       1,
       'The function that emails you about a failed sync is itself failing. You may miss a sync failure. Check the notify function logs.');
+    watch(this, stage, mail, 'SlackAlertFailing', `${stage} Slack alert`,
+      props.slackFunction.metricErrors({ period: cdk.Duration.minutes(5), statistic: 'Sum', label: 'Slack alert errors' }),
+      1,
+      'The function that posts alerts to Slack is failing. Email still arrives. Check the Slack function logs.');
+    watch(this, stage, mail, 'SyncHung', `${stage} sync hung`,
+      new cloudwatch.Metric({
+        namespace: 'Chapters/Oikb',
+        metricName: 'SyncRunningTooLong',
+        dimensionsMap: { Stage: stage },
+        statistic: 'Maximum',
+        period: cdk.Duration.minutes(1),
+        label: 'Sync still running after an hour',
+      }),
+      2,
+      'The sync has been running for more than an hour. A normal sync of this repository finishes sooner. Check the daemon logs.');
     watch(this, stage, mail, 'SetupFailed', `${stage} setup`,
       props.workflow.metricFailed({ period: cdk.Duration.minutes(5), statistic: 'Sum', label: 'Failed setups' }),
       1,
@@ -158,60 +184,106 @@ export class MonitoringStack extends cdk.Stack {
       'The site blocked a burst of requests. One address is limited to 2000 requests every five minutes. If this was a visitor, they can try again shortly. If it continues, someone is flooding the site.',
       100);
 
-    const visitors = props.loadBalancer.metrics.requestCount({
-      period: cdk.Duration.minutes(5),
+    const five = cdk.Duration.minutes(5);
+    const requests = filled('requests', props.loadBalancer.metrics.requestCount({
+      period: five,
       statistic: 'Sum',
-      label: 'Requests',
-    });
-    const siteErrors = props.loadBalancer.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, {
-      period: cdk.Duration.minutes(5),
+    }), 'Requests');
+    const answered = filled('answers', props.loadBalancer.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_2XX_COUNT, {
+      period: five,
       statistic: 'Sum',
+    }), 'Answers from the site');
+    const rejected = filled('rejected', props.loadBalancer.metrics.httpCodeElb(elbv2.HttpCodeElb.ELB_4XX_COUNT, {
+      period: five,
+      statistic: 'Sum',
+    }), 'Rejected before the site');
+    const siteErrors = new cloudwatch.MathExpression({
+      expression: 'FILL(fromSite, 0) + FILL(fromBalancer, 0)',
+      usingMetrics: {
+        fromSite: props.loadBalancer.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, {
+          period: five,
+          statistic: 'Sum',
+        }),
+        fromBalancer: props.loadBalancer.metrics.httpCodeElb(elbv2.HttpCodeElb.ELB_5XX_COUNT, {
+          period: five,
+          statistic: 'Sum',
+        }),
+      },
+      period: five,
       label: 'Site errors',
     });
-    const speed = props.loadBalancer.metrics.targetResponseTime({
-      period: cdk.Duration.minutes(5),
-      statistic: 'Average',
-      label: 'Response time (seconds)',
+    const speed = new cloudwatch.MathExpression({
+      expression: 'seconds * 1000',
+      usingMetrics: {
+        seconds: props.loadBalancer.metrics.targetResponseTime({ period: five, statistic: 'Average' }),
+      },
+      period: five,
+      label: 'Milliseconds',
     });
     const freeDiskGb = new cloudwatch.MathExpression({
       expression: 'free / 1024 / 1024 / 1024',
       usingMetrics: {
-        free: props.database.metricFreeStorageSpace({ period: cdk.Duration.minutes(5), statistic: 'Average' }),
+        free: props.database.metricFreeStorageSpace({ period: five, statistic: 'Average' }),
       },
-      period: cdk.Duration.minutes(5),
+      period: five,
       label: 'Free disk (GB)',
     });
+    const blockedOrZero = filled('blocked', blocked, 'Blocked requests');
     const dashboard = new cloudwatch.Dashboard(this, stagified('Dashboard', stage), {
       dashboardName: stagified('chapters', stage, false),
+      defaultInterval: cdk.Duration.hours(3),
       widgets: [[
-        graph('Visitors', visitors),
-        graph('Site errors', siteErrors),
-        graph('How long requests take', speed),
+        number('Healthy website tasks', props.openWebuiTargetGroup.metrics.healthyHostCount({
+          period: minute,
+          statistic: 'Minimum',
+          label: 'Healthy tasks',
+        })),
+        number('Website tasks', taskCount(props.cluster, props.openWebuiService, 'LiveTaskCount', 'Maximum', minute, 'Website')),
+        number('Sync daemon tasks', taskCount(props.cluster, props.oikbDaemonService, 'LiveTaskCount', 'Maximum', minute, 'Sync daemon')),
+        number('GitHub helper tasks', taskCount(props.cluster, props.githubMcpService, 'LiveTaskCount', 'Maximum', minute, 'GitHub helper')),
+        number('Minutes since last sync', oikbAcross(stage, 'SecondsSinceLastSync', 'MIN', 'Minimum', minute, 'Minutes', 60)),
+        number('Next sync in (minutes)', oikbAcross(stage, 'NextSyncInSeconds', 'MIN', 'Minimum', minute, 'Minutes', 60)),
       ], [
-        graph(
-          'Tasks running',
-          taskCount(props.cluster, props.webService, 'RunningTaskCount', 'Average', cdk.Duration.minutes(5), 'Website'),
-          taskCount(props.cluster, props.daemonService, 'RunningTaskCount', 'Average', cdk.Duration.minutes(5), 'Sync daemon'),
-          taskCount(props.cluster, props.mcpService, 'RunningTaskCount', 'Average', cdk.Duration.minutes(5), 'GitHub helper'),
-        ),
-        graph('Database processor', props.database.metricCPUUtilization({ period: cdk.Duration.minutes(5), statistic: 'Average', label: 'CPU (%)' })),
-        graph('Database connections', props.database.metricDatabaseConnections({ period: cdk.Duration.minutes(5), statistic: 'Maximum', label: 'Connections' })),
+        number('Last sync took (seconds)', oikbAcross(stage, 'LastSyncDurationSeconds', 'MAX', 'Maximum', minute, 'Seconds')),
+        number('Files added last sync', oikbAcross(stage, 'FilesAdded', 'SUM', 'Maximum', minute, 'Files')),
+        number('Files changed last sync', oikbAcross(stage, 'FilesModified', 'SUM', 'Maximum', minute, 'Files')),
+        number('Files removed last sync', oikbAcross(stage, 'FilesRemoved', 'SUM', 'Maximum', minute, 'Files')),
+        number('Syncs succeeded', oikbStatus(stage, 'success', minute, 'Succeeded')),
+        number('Syncs failed', oikbStatus(stage, 'error', minute, 'Failed')),
       ], [
-        graph('Database free disk', freeDiskGb),
-        graph('Blocked requests', blocked),
+        graph('Requests to the site. One page load is about 200', [requests], { min: 0 }),
+        graph('Answers and errors', [answered, rejected, siteErrors], { min: 0 }),
+        graph('How long a request took', [speed], { min: 0 }),
       ], [
-        graph(
-          'Syncs',
-          oikbMetric(stage, 'Syncs', 'Succeeded', 'Sum', { Status: 'success' }),
-          oikbMetric(stage, 'Syncs', 'Partial', 'Sum', { Status: 'partial' }),
-          oikbMetric(stage, 'Syncs', 'Failed', 'Sum', { Status: 'error' }),
-        ),
-        graph(
-          'Files synced',
-          oikbMetric(stage, 'FilesUploaded', 'Uploaded', 'Sum'),
-          oikbMetric(stage, 'FilesDeleted', 'Deleted', 'Sum'),
-        ),
-        graph('Sync duration', oikbMetric(stage, 'SyncDurationSeconds', 'Longest sync (seconds)', 'Maximum')),
+        graph('Tasks', [
+          taskCount(props.cluster, props.openWebuiService, 'LiveTaskCount', 'Average', five, 'Website'),
+          taskCount(props.cluster, props.oikbDaemonService, 'LiveTaskCount', 'Average', five, 'Sync daemon'),
+          taskCount(props.cluster, props.githubMcpService, 'LiveTaskCount', 'Average', five, 'GitHub helper'),
+        ], { min: 0, max: 2 }),
+        graph('Database processor', [
+          props.database.metricCPUUtilization({ period: five, statistic: 'Average', label: 'CPU (%)' }),
+        ], { min: 0, max: 100 }),
+        graph('Database connections', [
+          props.database.metricDatabaseConnections({ period: five, statistic: 'Maximum', label: 'Connections' }),
+        ], { min: 0, max: 100 }),
+      ], [
+        graph('Database free disk, out of 20 GB', [freeDiskGb], { min: 0, max: 20, label: 'GB free' }),
+        graph('Blocked requests. The limit is 2000 per address every five minutes', [blockedOrZero], { min: 0 }),
+        graph('Sync still running after an hour', [
+          oikbMetric(stage, 'SyncRunningTooLong', 'Over an hour', 'Maximum', {}, five),
+        ], { min: 0, max: 1 }),
+      ], [
+        graph('Syncs finished since this task started', [
+          oikbStatus(stage, 'success', five, 'Succeeded'),
+          oikbStatus(stage, 'partial', five, 'Partial'),
+          oikbStatus(stage, 'error', five, 'Failed'),
+        ], { min: 0 }, 12),
+        graph('Files uploaded and deleted since this task started', [
+          oikbAcross(stage, 'FilesUploadedTotal', 'SUM', 'Maximum', five, 'Uploaded'),
+          oikbAcross(stage, 'FilesDeletedTotal', 'SUM', 'Maximum', five, 'Deleted'),
+        ], { min: 0 }, 12),
+      ], [
+        syncHistory(stage),
       ]],
     });
 
@@ -269,13 +341,12 @@ function watch(
 
 function serviceMissing(cluster: ecs.ICluster, service: ecs.IBaseService, period: cdk.Duration): cloudwatch.MathExpression {
   return new cloudwatch.MathExpression({
-    expression: 'IF(desired > 0 AND running < desired, 1, 0)',
+    expression: 'IF(live < 1, 1, 0)',
     usingMetrics: {
-      desired: taskCount(cluster, service, 'DesiredTaskCount', 'Maximum', period),
-      running: taskCount(cluster, service, 'RunningTaskCount', 'Minimum', period),
+      live: taskCount(cluster, service, 'LiveTaskCount', 'Minimum', period),
     },
     period,
-    label: 'Missing tasks',
+    label: 'Task is down',
   });
 }
 
@@ -306,23 +377,90 @@ function oikbMetric(
   label: string,
   statistic: string,
   dimensions: Record<string, string> = {},
+  period = cdk.Duration.minutes(5),
 ): cloudwatch.Metric {
   return new cloudwatch.Metric({
     namespace: 'Chapters/Oikb',
     metricName,
     dimensionsMap: { Stage: stage, ...dimensions },
     statistic,
-    period: cdk.Duration.minutes(5),
+    period,
     label,
   });
 }
 
-function graph(title: string, ...metrics: cloudwatch.IMetric[]): cloudwatch.GraphWidget {
+function oikbAcross(
+  stage: string,
+  metricName: string,
+  reduce: 'SUM' | 'MIN' | 'MAX',
+  statistic: string,
+  period: cdk.Duration,
+  label: string,
+  scale = 1,
+): cloudwatch.MathExpression {
+  const search = `SEARCH('{Chapters/Oikb,Source,Stage} MetricName="${metricName}" Stage="${stage}"', '${statistic}', ${period.toSeconds()})`;
+  return new cloudwatch.MathExpression({
+    expression: scale === 1 ? `${reduce}(${search})` : `${reduce}(${search}) / ${scale}`,
+    label,
+    period,
+  });
+}
+
+function oikbStatus(stage: string, status: string, period: cdk.Duration, label: string): cloudwatch.MathExpression {
+  return new cloudwatch.MathExpression({
+    expression: `SUM(SEARCH('{Chapters/Oikb,Source,Stage,Status} MetricName="SyncsFinished" Stage="${stage}" Status="${status}"', 'Maximum', ${period.toSeconds()}))`,
+    label,
+    period,
+  });
+}
+
+function syncHistory(stage: string): cloudwatch.LogQueryWidget {
+  return new cloudwatch.LogQueryWidget({
+    title: 'Finished syncs',
+    width: 24,
+    height: 6,
+    logGroupNames: [`/chapters/${stage}/daemon`],
+    queryLines: [
+      'filter @message like /sync-history status=/',
+      'parse @message "status=* duration_ms=* added=* modified=* deleted=* error=*" as status, durationMs, added, modified, deleted, error',
+      'fields @timestamp, status, durationMs, added, modified, deleted, error',
+      'sort @timestamp desc',
+      'limit 20',
+    ],
+  });
+}
+
+function filled(id: string, metric: cloudwatch.IMetric, label: string): cloudwatch.MathExpression {
+  return new cloudwatch.MathExpression({
+    expression: `FILL(${id}, 0)`,
+    usingMetrics: { [id]: metric },
+    label,
+    period: cdk.Duration.minutes(5),
+  });
+}
+
+function number(title: string, metric: cloudwatch.IMetric): cloudwatch.SingleValueWidget {
+  return new cloudwatch.SingleValueWidget({
+    title,
+    width: 4,
+    height: 4,
+    metrics: [metric],
+    sparkline: false,
+  });
+}
+
+function graph(
+  title: string,
+  metrics: cloudwatch.IMetric[],
+  axis?: cloudwatch.YAxisProps,
+  width = 8,
+): cloudwatch.GraphWidget {
   return new cloudwatch.GraphWidget({
     title,
-    width: 8,
+    width,
     height: 6,
     left: metrics,
+    leftYAxis: axis,
   });
 }
 

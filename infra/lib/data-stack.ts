@@ -2,6 +2,7 @@
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -73,7 +74,10 @@ export class DataStack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/database-url')),
     });
     this.database.secret.grantRead(writer);
-    this.databaseUrl.grantWrite(writer);
+    writer.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:PutSecretValue'],
+      resources: [this.databaseUrl.secretArn],
+    }));
 
     const provider = new cr.Provider(this, stagified('DatabaseUrlProvider', props.stage), {
       onEventHandler: writer,

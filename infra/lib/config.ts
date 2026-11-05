@@ -20,7 +20,7 @@ export interface StageConfig {
   embeddingModel: string;
   openWebuiImage: string;
   oikbImage: string;
-  mcpImage: string;
+  githubMcpImage: string;
   monthlyBudgetUsd: number;
 }
 
@@ -108,7 +108,7 @@ export function loadStageConfig(stage: Stage): StageConfig {
     embeddingModel: String(parsed.RAG_EMBEDDING_MODEL),
     openWebuiImage: String(parsed.OPEN_WEBUI_IMAGE),
     oikbImage: String(parsed.OIKB_IMAGE),
-    mcpImage: String(parsed.MCP_IMAGE),
+    githubMcpImage: String(parsed.MCP_IMAGE),
     monthlyBudgetUsd: Number(parsed.MONTHLY_BUDGET_USD),
   };
   if (!Number.isFinite(config.monthlyBudgetUsd) || config.monthlyBudgetUsd <= 0) {
