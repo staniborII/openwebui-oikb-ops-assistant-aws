@@ -37,16 +37,15 @@ The automatic check is deliberately shallow. It can see that the answer looks li
 
 A weak or empty answer is saved, and the deploy still succeeds. A broken setup does not. If health, sign-in, github-mcp registration, the tool list, or file processing fails, the task fails, the failure email goes out, and oikb-daemon stays off. A write tool in the list is one of those setup failures. The report keeps the two outcomes apart: `infrastructure_ok` is the setup, and `evaluation_ok` is the six answers.
 
-The report lands in the stage bucket as three objects:
+The current report lands in the stage bucket as two objects:
 
-- `reports/<stage>/<stamp>.json`, the full report for that run
-- `reports/<stage>/latest.txt`, a short summary of the same run
-- `reports/<stage>/latest.json`, a pointer. Its `report` field is the key of the full report
+- `reports/<stage>/latest.json`, the full answers
+- `reports/<stage>/latest.txt`, a short summary of those answers
 
-The full report is stored once. `latest.json` used to be a second copy of that JSON. It now only names the stamped object, so a later run can keep every report and still show which one is current.
+When a later run replaces `latest.json`, the previous report is kept as `reports/<stage>/<stamp>.json`. The date is when that older report was saved. The new run is not also stored under a date.
 
 ## What a person still does
 
-Open `latest.json` and read the file it names before sending anyone the URL. Check that the library answers cite real files, or a real list of connectors (e.g. Github, Gitlab, Confluence etc. Should  be one of the 47 connectors), and that the live answers name a real issue, commit, or pull request. A number the model invented still fails that reading. In the browser, the tool trace for a live question should be a read of issues, commits, or pull requests, and no write tool should have been offered.
+Read `latest.json` before sending anyone the URL. Check that the library answers cite real files, or a real list of connectors (e.g. Github, Gitlab, Confluence etc. Should  be one of the 47 connectors), and that the live answers name a real issue, commit, or pull request. A number the model invented still fails that reading. In the browser, the tool trace for a live question should be a read of issues, commits, or pull requests, and no write tool should have been offered.
 
-A grader that keeps running is not in this repository yet. The shape of it is already clear. EventBridge would start a task on a schedule. That task would ask the same six questions bootstrap already asks and write another object under `reports/<stage>/`. The expected path fragments would be pinned from a known-good report, the object `latest.json` names, so a later run can be compared with one that was already trusted. The live questions are scored by an issue number, a pull-request number, or a commit sha of 12 to 40 hex characters in the answer. A small set of answers from release `v0.6.0` would sit beside them, so a change in the model is visible. Take that set from a run against the deployed assistant, not from memory. A weak answer would update the report and leave oikb-daemon running.
+A grader that keeps running is not in this repository yet. The shape of it is already clear. EventBridge would start a task on a schedule. That task would ask the same six questions bootstrap already asks and write another object under `reports/<stage>/`. The expected path fragments would be pinned from a known-good `latest.json`, so a later run can be compared with one that was already trusted. The live questions are scored by an issue number, a pull-request number, or a commit sha of 12 to 40 hex characters in the answer. A small set of answers from release `v0.6.0` would sit beside them, so a change in the model is visible. Take that set from a run against the deployed assistant, not from memory. A weak answer would update the report and leave oikb-daemon running.

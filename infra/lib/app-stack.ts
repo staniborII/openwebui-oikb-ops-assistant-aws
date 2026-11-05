@@ -359,6 +359,10 @@ export class AppStack extends cdk.Stack {
     grantPutSecretValue(webuiApiKey, this.bootstrapTask.taskRole);
     grantPutSecretValue(knowledgeBaseId, this.bootstrapTask.taskRole);
     props.bucket.grantPut(this.bootstrapTask.taskRole, 'reports/*');
+    this.bootstrapTask.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject'],
+      resources: [props.bucket.arnForObjects('reports/*')],
+    }));
 
     this.topic = new sns.Topic(this, stagified('Alerts', stage), {
       topicName: stagified('chapters-alerts', stage, false),

@@ -37,7 +37,7 @@ The stacks deploy in order: Network, Data, App, Orchestration, Monitoring.
 4. Open the CloudWatch dashboard named in the monitoring stack output. Health alarms arrive as short sentences: what is wrong, the stage, and the time. A later mail says the same thing has recovered.
 5. If a failure email arrives, read the stage, the reason, and the log group it names. oikb-daemon stays off. A setup failure can also send a short alarm that points at that email.
 
-The workflow creates the vector extension, migrates Open WebUI, starts one website task, waits 30 seconds, runs bootstrap, starts oikb-daemon, then sends the ready mail. Bootstrap polls `/health/db` for up to 20 minutes. Bootstrap writes the report to `reports/<stage>/<stamp>.json` in the stage bucket. `reports/<stage>/latest.json` names that object. How to read it is in the [eval proposal](eval-proposal.md).
+The workflow creates the vector extension, migrates Open WebUI, starts one website task, waits 30 seconds, runs bootstrap, starts oikb-daemon, then sends the ready mail. Bootstrap polls `/health/db` for up to 20 minutes. Bootstrap's report is at `reports/<stage>/latest.json` in the stage bucket. `latest.txt` is the short summary. A later run keeps the previous report as a dated object. How to read it is in the [eval proposal](eval-proposal.md).
 
 The setup workflow starts the vector, migrate, and bootstrap tasks by family name. A new image updates the app stack and does not start the workflow by itself. After that deploy, start the state machine `chapters-bootstrap-<stage>` once. Bootstrap reuses the same knowledge base and assistant.
 

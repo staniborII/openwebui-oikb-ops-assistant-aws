@@ -12,10 +12,11 @@ import os
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import timezone
 
 import boto3
 import requests
+from botocore.exceptions import ClientError
 
 from bootstrap.context_budget import FILTER_ID, filter_source
 
@@ -609,26 +610,49 @@ def has_citation(payload: dict) -> bool:
 
 
 def write_report(report: dict) -> None:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     stage = report["stage"]
     body = json.dumps(report, indent=2).encode("utf-8")
     summary = summary_text(report).encode("utf-8")
-    report_key = f"reports/{stage}/{stamp}.json"
-    pointer = json.dumps({"report": report_key}, indent=2).encode("utf-8")
     client = boto3.client("s3", region_name="us-east-1")
     bucket = os.environ["BUCKET"]
-    # The stamped object is the report. latest.json only names it, so the same
-    # JSON is not stored twice. The pointer is written after that object and
-    # before the summary, so a failed upload cannot name a missing report or
-    # leave the summary ahead of the pointer.
+    latest_key = f"reports/{stage}/latest.json"
+    # Keep the report that latest.json is about to replace. The new run is
+    # written only to latest.json and latest.txt.
+    archive_replaced_report(client, bucket, stage, latest_key)
     pairs = [
-        (report_key, body, "application/json"),
-        (f"reports/{stage}/latest.json", pointer, "application/json"),
+        (latest_key, body, "application/json"),
         (f"reports/{stage}/latest.txt", summary, "text/plain"),
     ]
     for key, payload, content_type in pairs:
         client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType=content_type)
-    logging.info("wrote s3://%s/%s", bucket, report_key)
+    logging.info("wrote s3://%s/%s", bucket, latest_key)
+
+
+def archive_replaced_report(client, bucket: str, stage: str, latest_key: str) -> None:
+    try:
+        found = client.get_object(Bucket=bucket, Key=latest_key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return
+        raise
+    previous = found["Body"].read()
+    if report_pointer(previous):
+        return
+    stamp = found["LastModified"].astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    client.put_object(
+        Bucket=bucket,
+        Key=f"reports/{stage}/{stamp}.json",
+        Body=previous,
+        ContentType="application/json",
+    )
+
+
+def report_pointer(body: bytes) -> bool:
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and set(parsed) == {"report"} and isinstance(parsed.get("report"), str)
 
 
 def summary_text(report: dict) -> str:
