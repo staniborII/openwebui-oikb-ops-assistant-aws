@@ -423,7 +423,7 @@ function syncHistory(stage: string): cloudwatch.LogQueryWidget {
     queryLines: [
       'filter @message like /sync-history status=/',
       'parse @message "status=* duration_ms=* added=* modified=* deleted=* error=*" as status, durationMs, added, modified, deleted, error',
-      'fields @timestamp, status, durationMs, added, modified, deleted, error',
+      'display @timestamp, status, durationMs, added, modified, deleted, error',
       'sort @timestamp desc',
       'limit 20',
     ],
