@@ -103,7 +103,7 @@ export class AppStack extends cdk.Stack {
 
     const albSg = new ec2.SecurityGroup(this, stagified('AlbSecurityGroup', stage), {
       vpc: props.vpc,
-      description: 'Load balancer',
+      description: 'ALB security group',
       allowAllOutbound: true,
     });
     for (const cidr of config.allowedIps) {
@@ -568,6 +568,9 @@ function openWebuiEnvironment(config: StageConfig, bucket: s3.IBucket, migration
     RAG_OPENAI_API_BASE_URL: 'https://api.openai.com/v1',
     RAG_EMBEDDING_ENGINE: 'openai',
     RAG_EMBEDDING_MODEL: config.embeddingModel,
+    // Chunk metadata key that holds the uploaded file name. The source tag's
+    // name attribute is the knowledge collection, so this is what reaches the model.
+    RAG_SOURCE_METADATA_KEYS: 'source',
     STORAGE_PROVIDER: 's3',
     S3_BUCKET_NAME: bucket.bucketName,
     S3_REGION_NAME: 'us-east-1',

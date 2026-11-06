@@ -7,7 +7,7 @@ These files check the code on a laptop. They do not call AWS, Open WebUI, or Git
 Context budget, from the repository root:
 
 ```text
-python -m unittest bootstrap.context_budget_test
+python -m unittest bootstrap.context_budget_test bootstrap.eval_score_test
 ```
 
 Sync readings, from `containers/sync-metrics`:
@@ -26,12 +26,15 @@ npm test
 
 ## Context budget
 
-`bootstrap/context_budget_test.py` checks `fit_request` in `bootstrap/context_budget.py`. That function builds the shorter message list sent to the model. The chat stored in Open WebUI stays complete. The default cap is 80,000 estimated tokens. `gpt-5-mini` uses 170,000. `gpt-4.1-mini` uses 650,000. Any other name uses 80,000.
+`bootstrap/context_budget_test.py` checks `fit_request` in `bootstrap/context_budget.py`. That function writes `File:` and the file name at the start of a retrieved passage that carries one, then builds the shorter message list sent to the model. The chat stored in Open WebUI stays complete. The default cap is 80,000 estimated tokens. `gpt-5-mini` uses 170,000. `gpt-4.1-mini` uses 650,000. Any other name uses 80,000.
 
 A turn stays when it shares a file path, an issue number, a connector id such as `github:open-webui/oikb`, or a commit id with the current question. The word `github` by itself does not count. A hex string counts when it is labeled as a commit, appears in a `/commit/` URL, or is a 40- or 64-character sha. A short unlabeled hex string does not. The last four turns stay even when they share nothing, unless that window itself is over the cap.
 
 | Test | What it checks |
 |---|---|
+| `test_retrieved_file_name_is_written_on_the_passage` | A passage tagged with the collection name `oikb` and the file name `webhooks.py` gains one `File: webhooks.py` line. Fitting that result again adds nothing. The input list is not rewritten. |
+| `test_full_path_is_preferred_and_a_url_is_not_a_file` | When a passage has both `src/oikb/webhooks.py` and a URL, the `File:` line is the repository path. A passage whose only name is a URL is left as it arrived. |
+| `test_collection_name_alone_is_not_labeled` | A passage named `oikb`, with no file name, is left as it arrived. |
 | `test_short_chat_is_unchanged` | A short chat is returned as it arrived. The input list is not rewritten. |
 | `test_long_chat_keeps_relevant_history_and_drops_the_rest` | The system prompt, turns that share `src/cli.py` or `#482` with the question, and a recent filler turn stay. An older turn about the weather goes. The result is under the cap. |
 | `test_recent_turns_stay_and_an_older_irrelevant_turn_goes` | Six unrelated turns become the last four. |
@@ -49,6 +52,20 @@ A turn stays when it shares a file path, an issue number, a connector id such as
 | `test_recent_exchanges_yield_when_the_window_itself_is_too_large` | When the recent window is over the cap, the oldest of those turns goes. The current question stays, and a second fit changes nothing. |
 | `test_cap_follows_the_selected_model` | `gpt-4o-mini` is 80,000, `gpt-5-mini` is 170,000, `gpt-4.1-mini` is 650,000, including a dated suffix. An unknown name uses 80,000. The filter reads `base_model_id` from the assistant, so a question that is too long for the default cap is kept when the base model is `gpt-5-mini`. |
 | `test_filter_failure_keeps_the_system_prompt_and_current_question` | A message that is not a chat object is dropped. The system prompt, the current question, and the tool list stay. |
+
+## Evaluation answers
+
+`bootstrap/eval_score_test.py` checks `answer_is_specific` and `score_answer` in `bootstrap/eval_score.py`. Those functions decide pass or fail for one of the six questions, and the one-sentence reason stored on the report. They do not call Open WebUI.
+
+| Test | What it checks |
+|---|---|
+| `test_webhook_route_without_a_file_fails` | A reply that names `POST /webhooks/github` and `github_webhook`, and no file, fails the webhook question. |
+| `test_guessed_example_path_fails` | `oikb/cli.py` inside an example, in a sentence that offers to search, fails the commands question. |
+| `test_any_stated_file_passes` | `src/oikb/cli.py`, `cli.py`, `oikb/cli.py`, and `src/oikb/connectors/github.py` each pass when the answer states them. |
+| `test_connector_name_still_passes` | The connector list has 47 names. GitHub, Notion, and R2 each pass. A reply with no connector name does not, and `or2` does not count as R2. |
+| `test_live_answer_still_needs_a_number_or_a_sha` | `#149` and a 12-character sha pass. A live reply with neither does not. |
+| `test_score_names_the_reason` | A passing file answer names that file. A route with no file, a path that is only an example, a file with no citation, a connector answer, an issue number, a commit sha, and an empty answer each produce the matching reason. Pass or fail stays the same as `answer_is_specific` plus the citation rule. |
+| `test_an_example_clause_does_not_hide_an_earlier_file` | `src/oikb/webhooks.py` in one sentence still counts when the next sentence says "for example". |
 
 ## Sync readings
 

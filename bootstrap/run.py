@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import subprocess
 import time
 from datetime import timezone
@@ -19,6 +18,7 @@ import requests
 from botocore.exceptions import ClientError
 
 from bootstrap.context_budget import FILTER_ID, filter_source
+from bootstrap.eval_score import score_answer
 
 LIBRARY_QUESTIONS = [
     "Where in the code are the oikb commands defined?",
@@ -51,12 +51,15 @@ WRITE_MARKERS = (
     "disable_",
     "write",
 )
-PATH_RE = re.compile(r"[\w./-]+\.(?:py|md|yml|yaml|toml|json|go|rs|ts|js)")
-CONNECTOR_RE = re.compile(r"github|gitlab|confluence|s3|gcs|azure|sharepoint|bookstack|bitbucket", re.I)
-GITHUB_RE = re.compile(r"#\d+|\bissues?/\d+\b|\b[0-9a-f]{12,40}\b", re.I)
 SYSTEM_PROMPT = (
     "You are the oikb Ops Assistant. Answer from the oikb knowledge base and the "
-    "read-only GitHub tools. Name the file or connector you used."
+    "read-only GitHub tools. A question about where something is in the synced code "
+    "uses the knowledge base only. Do not call GitHub for that question. Start with "
+    "the file path copied from a retrieved passage's File line. A route, a function "
+    "name, or a source id is not a file. Do not offer to search later. If no retrieved "
+    "passage names a file, say the file was not in the retrieved pages. A question about "
+    "a live issue, commit, or pull request uses the read-only GitHub tools. Name the "
+    "file or connector you used."
 )
 ASSISTANT_DESCRIPTION = (
     "Answers from the oikb knowledge base, and from read-only GitHub when a "
@@ -548,16 +551,21 @@ def ask_questions(session: requests.Session, base: str, tool_id: str) -> list[di
     results = []
     for index, question in enumerate(QUESTIONS):
         try:
+            live = index >= len(LIBRARY_QUESTIONS)
+            payload = {
+                "model": "oikb-ops-assistant",
+                "messages": [{"role": "user", "content": question}],
+                "stream": False,
+                # Native tool calling returns a tool call and no text when streaming is off.
+                "params": {"function_calling": "legacy"},
+            }
+            # The first three questions are about the synced copy. Attaching GitHub
+            # here would let the model read the live repository instead.
+            if live:
+                payload["tool_ids"] = [tool_id]
             response = session.post(
                 f"{base}/api/chat/completions",
-                json={
-                    "model": "oikb-ops-assistant",
-                    "messages": [{"role": "user", "content": question}],
-                    "stream": False,
-                    "tool_ids": [tool_id],
-                    # Native tool calling returns a tool call and no text when streaming is off.
-                    "params": {"function_calling": "legacy"},
-                },
+                json=payload,
                 timeout=180,
             )
             if response.status_code != 200:
@@ -565,14 +573,14 @@ def ask_questions(session: requests.Session, base: str, tool_id: str) -> list[di
             body = response.json()
             answer = str(((body.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
             cited = has_citation(body)
-            live = index >= len(LIBRARY_QUESTIONS)
-            specific = answer_is_specific(index, answer, live)
+            passed, reason = score_answer(index, answer, live, cited)
             results.append(
                 {
                     "question": question,
                     "answer": answer,
                     "citation": cited,
-                    "passed": specific and bool(answer.strip()) and (cited or live),
+                    "passed": passed,
+                    "reason": reason,
                 }
             )
         except Exception as exc:
@@ -582,18 +590,11 @@ def ask_questions(session: requests.Session, base: str, tool_id: str) -> list[di
                     "answer": "",
                     "citation": False,
                     "passed": False,
+                    "reason": "The question could not be asked.",
                     "error": str(exc),
                 }
             )
     return results
-
-
-def answer_is_specific(index: int, answer: str, live: bool) -> bool:
-    if live:
-        return bool(GITHUB_RE.search(answer))
-    if index == 2:
-        return bool(CONNECTOR_RE.search(answer))
-    return bool(PATH_RE.search(answer))
 
 
 def has_citation(payload: dict) -> bool:
@@ -668,6 +669,8 @@ def summary_text(report: dict) -> str:
         lines.append("")
         lines.append(f"question: {item['question']}")
         lines.append(f"passed: {item['passed']} citation: {item.get('citation')}")
+        if item.get("reason"):
+            lines.append(f"reason: {item['reason']}")
         if item.get("error"):
             lines.append(f"error: {item['error']}")
         excerpt = (item.get("answer") or "").strip().replace("\n", " ")

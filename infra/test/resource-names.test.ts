@@ -132,6 +132,7 @@ test('dev tasks and roles stay least privilege', () => {
   const webEnv = taskEnvironment(application, 'chapters-web-dev');
   assert.equal(webEnv.CORS_ALLOW_ORIGIN, 'https://dev-client-openwebui.flexxytech.com');
   assert.equal(webEnv.CORS_ALLOW_ORIGIN, webEnv.WEBUI_URL);
+  assert.equal(webEnv.RAG_SOURCE_METADATA_KEYS, 'source');
   assert.equal(taskEnvironment(application, 'chapters-migrate-dev').CORS_ALLOW_ORIGIN, webEnv.CORS_ALLOW_ORIGIN);
 
   const dataActions = policyActions(data);

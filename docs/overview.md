@@ -69,8 +69,8 @@ These AWS services sit on that path. Who may connect, and the port list, are in 
 
 | Kind | What is used | What it does |
 |---|---|---|
-| Skills | None attached | A workspace skill is a markdown file the model loads when a task needs those steps. Every call sends this system prompt: "You are the oikb Ops Assistant. Answer from the oikb knowledge base and the read-only GitHub tools. Name the file or connector you used." |
-| Rules | Filter `oikb_context_budget` | Active on this assistant only. It runs on the request hook after retrieval and after the tool definitions are attached, and it shortens the payload sent to the model. The chat stored in Open WebUI stays complete. The caps are in the next section. |
+| Skills | None attached | A workspace skill is a markdown file the model loads when a task needs those steps. Every call sends this system prompt: "You are the oikb Ops Assistant. Answer from the oikb knowledge base and the read-only GitHub tools. A question about where something is in the synced code uses the knowledge base only. Do not call GitHub for that question. Start with the file path copied from a retrieved passage's File line. A route, a function name, or a source id is not a file. Do not offer to search later. If no retrieved passage names a file, say the file was not in the retrieved pages. A question about a live issue, commit, or pull request uses the read-only GitHub tools. Name the file or connector you used." |
+| Rules | Filter `oikb_context_budget` | Active on this assistant only. It runs on the request hook after retrieval and after the tool definitions are attached. It writes `File:` and the file name at the start of a retrieved passage that carries one, then shortens the payload sent to the model. The chat stored in Open WebUI stays complete. The caps are in the next section. |
 | Rules | Write-tool check | During setup, bootstrap reads the MCP tool list. An empty list, or a tool name that looks like a write, stops setup, and oikb-daemon is not started. |
 | MCP | `github-mcp` | One tool server, type `mcp`, auth `none`, URL `http://github-mcp.chapters-<stage>.local:8082`. The description stored on it is "Read-only GitHub MCP". The proxy holds the token. |
 | Tools | Default toolsets, read-only | The server is started with no toolset list, so it registers context, repos, issues, pull requests, and users. `--read-only` leaves the write tools in those sets unregistered. The model calls the read tools for a live issue, pull request, commit, or file. Answers about the synced library come from the `oikb` knowledge base. |
@@ -81,7 +81,7 @@ A person opens `https://` plus the stage hostname. The load balancer accepts onl
 
 Open WebUI reads the account, the chat, and the assistant from PostgreSQL. The assistant's documents are the knowledge base. The file bytes of those documents are objects in the stage S3 bucket. The embeddings that make search work are pgvector rows in the same database.
 
-The chat on screen stays complete. Before each model call, a filter on `oikb Ops Assistant` shortens only the request sent to the model.
+The chat on screen stays complete. Before each model call, a filter on `oikb Ops Assistant` writes `File:` and the file name at the start of a retrieved passage that carries one, then shortens only the request sent to the model. The name on the passage is the uploaded file name. The collection name is not used as that file.
 
 It keeps the system prompt, the current question, and any passages already written into that question. It keeps the GitHub tool definitions and the three preceding exchanges. It also keeps an older turn that names the same file, issue, commit, or connector id, such as `github:open-webui/oikb`.
 

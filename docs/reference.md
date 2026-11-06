@@ -49,7 +49,9 @@ The instance is a `t3.micro` with 20 GB, single-AZ, encrypted, and not publicly 
 
 ## Plain environment on Open WebUI
 
-`HOST` `0.0.0.0`, `PORT` `8080`, `UVICORN_WORKERS` `1`, `WEBUI_URL` `https://` plus `WEB_DOMAIN_NAME`, `CORS_ALLOW_ORIGIN` the same address, `ENABLE_DB_MIGRATIONS` `false` on the service and `true` on the migration task, `ENABLE_OLLAMA_API` `false`, `ENABLE_API_KEYS` `true`, `ENABLE_SIGNUP` and `DEFAULT_USER_ROLE` from `infra/.env`, `VECTOR_DB` `pgvector`, `PGVECTOR_CREATE_EXTENSION` `false`, `RAG_EMBEDDING_ENGINE` `openai`, `RAG_EMBEDDING_MODEL` from the stage file, `STORAGE_PROVIDER` `s3`, `S3_BUCKET_NAME`, `S3_REGION_NAME` `us-east-1`.
+`HOST` `0.0.0.0`, `PORT` `8080`, `UVICORN_WORKERS` `1`, `WEBUI_URL` `https://` plus `WEB_DOMAIN_NAME`, `CORS_ALLOW_ORIGIN` the same address, `ENABLE_DB_MIGRATIONS` `false` on the service and `true` on the migration task, `ENABLE_OLLAMA_API` `false`, `ENABLE_API_KEYS` `true`, `ENABLE_SIGNUP` and `DEFAULT_USER_ROLE` from `infra/.env`, `VECTOR_DB` `pgvector`, `PGVECTOR_CREATE_EXTENSION` `false`, `RAG_EMBEDDING_ENGINE` `openai`, `RAG_EMBEDDING_MODEL` from the stage file, `RAG_SOURCE_METADATA_KEYS` `source`, `STORAGE_PROVIDER` `s3`, `S3_BUCKET_NAME`, `S3_REGION_NAME` `us-east-1`.
+
+`RAG_SOURCE_METADATA_KEYS` is `source`. Open WebUI then puts the uploaded file name on each retrieved passage. The passage's name attribute stays the knowledge collection. The assistant filter copies that file name onto a `File:` line at the start of the passage.
 
 `CORS_ALLOW_ORIGIN` replaces the image default `*`. With `*`, any other website can call this API from a visitor's browser and use that visitor's login. The value here is the public site address, so only that origin is allowed. Opening the site in a browser is unchanged, because the page and the API are that same address. Setup and the sync job call the API from inside the VPC, and those calls do not use CORS.
 

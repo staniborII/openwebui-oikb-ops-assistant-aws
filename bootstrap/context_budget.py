@@ -1,9 +1,10 @@
 """Choose the messages sent to the model for one oikb Ops Assistant turn.
 
-The chat stored in Open WebUI stays complete. This module only builds the
-shorter payload. The cap follows the selected base model. Open WebUI runs the
-same source as a filter and cannot import this package, so filter_source()
-returns one self-contained script.
+The chat stored in Open WebUI stays complete. This module writes the file name
+at the start of a retrieved passage, then builds the shorter payload. The cap
+follows the selected base model. Open WebUI runs the same source as a filter
+and cannot import this package, so filter_source() returns one self-contained
+script.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ _COMMIT_RE = re.compile(
     re.I,
 )
 _SOURCE_RE = re.compile(r"<source\b[^>]*>.*?</source>", re.I | re.S)
+_ATTR_RE = re.compile(r'([A-Za-z_:][\w:.-]*)="([^"]*)"')
 _CONNECTOR_RE = re.compile(
     r"\b(?:github|gitlab|confluence|s3|gcs|azure|sharepoint|bookstack|bitbucket):[A-Za-z0-9_./-]*[A-Za-z0-9_/-]",
     re.I,
@@ -72,7 +74,7 @@ def base_model_id(body, model) -> str:
 def fit_request(messages: list, tools=None, budget: int = BUDGET_TOKENS) -> list:
     """Return a new message list that fits the budget when history can yield."""
     copied = copy.deepcopy(messages)
-    return _fit(copied, tools, budget)
+    return _fit(_label_messages(copied), tools, budget)
 
 
 def estimate_tokens(messages: list, tools=None) -> int:
@@ -81,6 +83,59 @@ def estimate_tokens(messages: list, tools=None) -> int:
         payload["tools"] = tools
     text = json.dumps(payload, ensure_ascii=False, default=str)
     return len(text) // 4
+
+
+def _label_messages(messages: list) -> list:
+    """Write the file path at the start of each retrieved passage that has one."""
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = _label_text(content)
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                for key in ("text", "content"):
+                    if isinstance(part.get(key), str):
+                        part[key] = _label_text(part[key])
+    return messages
+
+
+def _label_text(text: str) -> str:
+    return _SOURCE_RE.sub(_label_source, text)
+
+
+def _label_source(match: re.Match) -> str:
+    tag = match.group(0)
+    open_end = tag.find(">")
+    close = tag.lower().rfind("</source>")
+    if open_end < 0 or close < open_end:
+        return tag
+    opener = tag[:open_end]
+    body = tag[open_end + 1 : close]
+    label = _file_label(_ATTR_RE.findall(opener))
+    if not label:
+        return tag
+    prefix = f"File: {label}\n"
+    if body.startswith(prefix):
+        return tag
+    return f"{opener}>{prefix}{body}{tag[close:]}"
+
+
+def _file_label(attrs: list) -> str:
+    found = []
+    for _name, value in attrs:
+        if "://" in value or value.startswith("//"):
+            continue
+        for path in _paths(value):
+            if ".." in path.split("/"):
+                continue
+            found.append(path)
+    if not found:
+        return ""
+    return max(found, key=len)
 
 
 def _fit(messages: list, tools, budget: int) -> list:

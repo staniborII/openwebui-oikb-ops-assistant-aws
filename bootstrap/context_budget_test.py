@@ -40,6 +40,32 @@ def _tool(call_id: str, text: str) -> dict:
 
 
 class ContextBudgetTest(unittest.TestCase):
+    def test_retrieved_file_name_is_written_on_the_passage(self):
+        passage = '<source id="1" name="oikb" source="webhooks.py">def github_webhook():\n    pass</source>'
+        messages = [_user(f"Where are webhooks handled?\n{passage}")]
+        original = copy.deepcopy(messages)
+        fitted = fit_request(messages)
+        self.assertEqual(messages, original)
+        labeled = fitted[-1]["content"]
+        self.assertIn("File: webhooks.py\n", labeled)
+        self.assertIn("def github_webhook():", labeled)
+        self.assertEqual(labeled.count("File: webhooks.py"), 1)
+        self.assertEqual(fit_request(fitted), fitted)
+
+    def test_full_path_is_preferred_and_a_url_is_not_a_file(self):
+        passage = (
+            '<source id="2" name="src/oikb/webhooks.py" '
+            'source="https://example.com/files/webhooks.py">body</source>'
+        )
+        labeled = fit_request([_user(passage)])[0]["content"]
+        self.assertIn("File: src/oikb/webhooks.py\nbody", labeled)
+        url_only = '<source source="https://example.com/webhooks.py">body</source>'
+        self.assertEqual(fit_request([_user(url_only)])[0]["content"], url_only)
+
+    def test_collection_name_alone_is_not_labeled(self):
+        passage = '<source id="3" name="oikb">POST /webhooks/github</source>'
+        self.assertEqual(fit_request([_user(passage)])[0]["content"], passage)
+
     def test_short_chat_is_unchanged(self):
         messages = [
             {"role": "system", "content": "You are the oikb Ops Assistant."},
@@ -196,6 +222,11 @@ class ContextBudgetTest(unittest.TestCase):
         self.assertEqual(result["messages"], [_user("hello")])
         self.assertEqual(body["tools"], original["tools"])
         self.assertEqual(FILTER_ID, "oikb_context_budget")
+        labeled = {
+            "messages": [_user('<source id="1" source="cli.py">def sync():\n    pass</source>')],
+        }
+        labeled_result = asyncio.run(namespace["Filter"]().request(labeled))
+        self.assertIn("File: cli.py\n", labeled_result["messages"][0]["content"])
 
     def test_connector_id_keeps_a_turn_and_the_word_github_does_not(self):
         messages = [

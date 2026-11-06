@@ -24,16 +24,13 @@ The fourth should cite an issue number. The fifth should cite commit shas. The s
 
 ## How a run is scored
 
-Bootstrap sends each question to `POST /api/chat/completions` as `oikb Ops Assistant`. Streaming is off, and the github-mcp tool id is attached, so the assistant can call GitHub if it chooses. For each question the report keeps the question, the answer text, whether Open WebUI returned a source citation, and pass or fail.
+Bootstrap sends each question to `POST /api/chat/completions` as `oikb Ops Assistant`. Streaming is off. The github-mcp tool id is attached on the last three questions. The first three are about the synced copy, and those requests do not attach the tool. For each question the report keeps the question, the answer text, whether Open WebUI returned a source citation, pass or fail, and a one-sentence reason for that result. The reason names the file, connector, issue, pull request, or commit that decided a pass, or the check that was missing.
 
-A pass on a library question needs both of these:
-
-- A citation is present.
-- The answer names a path-like file from the synced repository. For the connectors question, it names a connector.
+A pass on a library question needs a citation. The commands and webhook questions also need a path-like file in the answer. The connectors question needs one name from the guide's list of 47, matched as a whole word. A route, a function, or a source id does not count. A path that appears only as an example, or in a sentence that offers to search, does not count.
 
 A pass on a live question needs an issue number (`#123` or `issues/123`), a pull-request number written the same way, or a commit sha of 12 to 40 hex characters in the answer. The citation flag is still stored. A live answer can pass without one.
 
-The automatic check is deliberately shallow. It can see that the answer looks like a file path, an issue number, or a commit sha. It cannot open the repository and prove the name is real. That is left to a person.
+The automatic check can see that the answer looks like a file path, an issue number, or a commit sha. It cannot open the repository and prove the name is real. That is left to a person.
 
 A weak or empty answer is saved, and the deploy still succeeds. A broken setup does not. If health, sign-in, github-mcp registration, the tool list, or file processing fails, the task fails, the failure email goes out, and oikb-daemon stays off. A write tool in the list is one of those setup failures. The report keeps the two outcomes apart: `infrastructure_ok` is the setup, and `evaluation_ok` is the six answers.
 
