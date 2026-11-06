@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Architecture
 
-`docs/private/plan.md` is the contract. Read it before changing infrastructure or bootstrap code.
+`docs/plan.md` is the contract. Read it before changing infrastructure or bootstrap code.
 
 - Region is `us-east-1`.
 - Stacks depend in one direction only: Network, Data, App, Orchestration, Monitoring. Data does not import App. Monitoring only reads earlier stacks.
