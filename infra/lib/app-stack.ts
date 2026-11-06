@@ -103,7 +103,7 @@ export class AppStack extends cdk.Stack {
 
     const albSg = new ec2.SecurityGroup(this, stagified('AlbSecurityGroup', stage), {
       vpc: props.vpc,
-      description: 'ALB security group',
+      description: 'Application Load Balancer security group',
       allowAllOutbound: true,
     });
     for (const cidr of config.allowedIps) {
@@ -198,6 +198,7 @@ export class AppStack extends cdk.Stack {
     this.loadBalancer.addListener('Http', {
       port: 80,
       protocol: elbv2.ApplicationProtocol.HTTP,
+      open: false,
       defaultAction: elbv2.ListenerAction.redirect({
         protocol: 'HTTPS',
         port: '443',
@@ -207,6 +208,7 @@ export class AppStack extends cdk.Stack {
     const https = this.loadBalancer.addListener('Https', {
       port: 443,
       protocol: elbv2.ApplicationProtocol.HTTPS,
+      open: false,
       certificates: [elbv2.ListenerCertificate.fromArn(config.certificateArn)],
     });
     this.openWebuiTargetGroup = https.addTargets('Web', {

@@ -8,6 +8,8 @@ BUCKET_NAME: chapters-openwebui-dev
 WEB_DOMAIN_NAME: dev-client-openwebui.flexxytech.com
 ALLOWED_IPS:
   - 0.0.0.0/0
+  # restrict by entering custom IP in ALLOWED_IPS e.g. the ip below with /32 allows only that ip
+  # - 84.132.252.60/32
 DOMAIN_HOSTED_ZONE_ID: Z05020441DNM63CBYX7ND
 DOMAIN_HOSTED_ZONE_NAME: flexxytech.com
 CERTIFICATE_ARN: arn:aws:acm:us-east-1:863518416406:certificate/665861ca-984e-436a-8c3d-63efe121312e
